@@ -1,0 +1,14 @@
+*.pyc
+*.txt
+*.aux
+*.log
+*.out
+*.toc
+*.gz
+*.blg
+*.bbl
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+PKG-INFO
+*.usd
