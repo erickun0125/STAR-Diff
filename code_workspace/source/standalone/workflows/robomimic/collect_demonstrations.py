@@ -36,7 +36,7 @@ import torch
 
 from isaaclab.devices import Se3Keyboard, Se3SpaceMouse
 from isaaclab.managers import TerminationTermCfg as DoneTerm
-from isaaclab.utils.io import dump_pickle, dump_yaml
+from isaaclab.utils.io import dump_yaml
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.data_collector import RobomimicDataCollector
@@ -100,7 +100,6 @@ def main():
     log_dir = os.path.join("./logs/robomimic", args_cli.task)
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
-    dump_pickle(os.path.join(log_dir, "params", "env.pkl"), env_cfg)
 
     # create data-collector
     collector_interface = RobomimicDataCollector(
