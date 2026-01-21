@@ -42,7 +42,7 @@ from rsl_rl.runners import OnPolicyRunner
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
-from isaaclab_tasks.utils.wrappers.rsl_rl import (
+from isaaclab_rl.rsl_rl import (
     RslRlOnPolicyRunnerCfg,
     RslRlVecEnvWrapper,
     export_policy_as_jit,

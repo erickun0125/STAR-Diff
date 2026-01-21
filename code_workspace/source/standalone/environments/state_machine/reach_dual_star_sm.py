@@ -212,7 +212,7 @@ def main():
     env = gym.make("Isaac-Reach-Dual-STAR-IK-Abs-v0", cfg=env_cfg)
     # reset environment at start
     env.reset()
-    env.sim.step()
+    env.unwrapped.sim.step()
 
     # create action buffers (position + quaternion)
     actions = torch.zeros(env.unwrapped.action_space.shape, device=env.unwrapped.device)
@@ -228,8 +228,8 @@ def main():
             dones = env.step(actions)[-2]
 
             # observations
-            robot_1: RigidObject = env.scene["robot_1"]
-            robot_2: RigidObject = env.scene["robot_2"]
+            robot_1: RigidObject = env.unwrapped.scene["robot_1"]
+            robot_2: RigidObject = env.unwrapped.scene["robot_2"]
             # -- end-effector frame
             ee_1_frame_sensor = env.unwrapped.scene["ee_1_frame"]
             tcp_1_rest_position = ee_1_frame_sensor.data.target_pos_w[..., 0, :].clone() - env.unwrapped.scene.env_origins
