@@ -10,6 +10,9 @@ from ...configs.controller_cfg import IKWithJointSpaceControllerCfg
 from ...assets.configs.fr5_cfg import FR5_CFG
 from ...assets.configs.trocar_cfg import TROCAR_CFG
 from ..mdp.events import randomize_trocar_pose
+from isaaclab.managers import ObservationGroupCfg as ObsGroup
+from isaaclab.managers import ObservationTermCfg as ObsTerm
+import isaaclab.envs.mdp as mdp
 
 @configclass
 class FR5SurgicalSceneCfg(InteractiveSceneCfg):
@@ -86,7 +89,47 @@ class ActionsCfg:
 @configclass
 class ObservationsCfg:
     """Observation dictionary."""
-    pass # To be implemented based on policy needs
+    @configclass
+    class PolicyStateCfg(ObsGroup):
+        """Observations for policy state."""
+        # Robot Joint State
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel)
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel)
+        
+        # End Effector State (World Frame)
+        ee_pos = ObsTerm(
+            func=mdp.body_pos,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names="ee_link")} # Ensure body name is correct
+        )
+        ee_quat = ObsTerm(
+            func=mdp.body_quat,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names="ee_link")}
+        )
+        
+        # Trocar State (World Frame)
+        trocar_pos = ObsTerm(
+            func=mdp.root_pos_w, 
+            params={"asset_cfg": SceneEntityCfg("trocar")}
+        )
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenation = False 
+
+    policy_state = PolicyStateCfg()
+
+    @configclass
+    class TiledCameraCfg(ObsGroup):
+        """Observations for Tiled Camera."""
+        rgb = ObsTerm(
+            func=mdp.generated_image,
+            params={"asset_cfg": SceneEntityCfg("camera"), "data_type": "rgb", "convert_to_float": True}
+        )
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenation = False
+            
+    tiled_camera = TiledCameraCfg()
 
 @configclass
 class EventCfg:

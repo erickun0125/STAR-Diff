@@ -197,30 +197,19 @@ class RCMAwareAction(ActionTerm):
         # Get robot state
         # Jacobian from `body_idx`
         jacobians = self._asset.data.body_jacobians[:, self._body_idx, :, :] # (N, 6, NJ)
-        # Note: Jacobian is usually in base frame if articulation root is fixed? 
-        # IsaacLab Jacobian is usually World Frame if not specified? 
-        # Wait, IsaacLab `data.body_jacobians` is usually expressed in World Frame.
-        # But controllers (especially OSC/DiffIK) might expect Base Frame or World Frame depending on usage.
-        # DiffIK: "The controller does not assume anything about the frames... user to ensure..."
-        # Existing IsaacLab envs usually pass World Frame quantities if the base is fixed.
-        # Let's assume World Frame for now.
         
         current_ee_pos = self._asset.data.body_pos_w[:, self._body_idx]
         current_ee_quat = self._asset.data.body_quat_w[:, self._body_idx]
+        current_ee_pose = torch.cat([current_ee_pos, current_ee_quat], dim=-1) # (N, 7)
         current_ee_vel = self._asset.data.body_vel_w[:, self._body_idx] # (N, 6)
         
         current_joint_pos = self._asset.data.joint_pos
         current_joint_vel = self._asset.data.joint_vel
         
         mass_matrix = self._asset.data.mass_matrix # (N, NJ, NJ)
-        # Gravity vector might need manual computation or is available in data?
-        # IsaacLab doesn't always expose gravity vector directly in data unless requested?
-        # Often it's `data.generalized_gravity_forces`? No, `inverse_dynamics` usually needed.
-        # If we pass None, gravity compensation might be skipped in controller (which is fine for now).
         
         if self._output_type == "joint_pos":
             # IK Controller
-            # Note: IK controller wrapper compute signature
             targets = self._controller.compute(
                 ee_pos_des, ee_quat_des,
                 current_ee_pos, current_ee_quat,
@@ -231,14 +220,14 @@ class RCMAwareAction(ActionTerm):
         elif self._output_type == "joint_effort":
             # Impedance or OSC
             targets = self._controller.compute(
-                ee_pos_des, ee_quat_des,
-                current_ee_pos=current_ee_pos,
-                current_ee_quat=current_ee_quat, # DiffIK needs this for ImpController
+                ee_pos_des=ee_pos_des, 
+                ee_quat_des=ee_quat_des,
                 jacobian=jacobians,
+                current_ee_pose=current_ee_pose,
+                current_ee_vel=current_ee_vel,
+                mass_matrix=mass_matrix,
                 current_joint_pos=current_joint_pos,
-                current_joint_vel=current_joint_vel,
-                current_ee_vel=current_ee_vel, # OSC Needs this
-                mass_matrix=mass_matrix
+                current_joint_vel=current_joint_vel
             )
             self._joint_effort_target = targets
 
