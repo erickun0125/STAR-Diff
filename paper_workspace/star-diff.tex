@@ -28,8 +28,10 @@
 \newcommand{\gamrel}{\gamma_{\text{rel}}}
 \newcommand{\xrcm}{x_{\text{RCM}}}
 \newcommand{\Mrcm}{\mathcal{M}_{\text{RCM}}}
+\newcommand{\Ptro}{\mathbf{P}_{\text{tro}}}
+\newcommand{\Pcam}{\mathbf{P}_{\text{cam}}}
 
-\title{\LARGE \bf STAR-Diff: Surgical Trocar-Adaptive Diffusion Policy \\ with RCM-aware Action Space}
+\title{\LARGE \bf STAR-Diff: Surgical Trocar-Adaptive, RCM-aware Diffusion Policy}
 
 \author{Anonymous Authors}
 
@@ -43,7 +45,7 @@
 % ABSTRACT
 %==============================================================================
 \begin{abstract}
-Automating laparoscopic surgery holds significant promise for improving surgical outcomes, yet existing learning-based approaches assume fixed trocar positions during both training and deployment—a simplification that rarely holds in clinical practice. We present \textbf{STAR-Diff} (\textbf{S}urgical \textbf{T}rocar-\textbf{A}daptive, \textbf{R}CM-aware \textbf{Diff}usion Policy), a novel imitation learning framework that enables generalization across varying trocar placements without retraining. Our key insight is that the Remote Center of Motion (RCM) constraint, which restricts instrument motion to pass through the trocar point, defines a 4-dimensional submanifold of $\SE(3)$. By directly parameterizing this constraint manifold as the action space, we eliminate the need for post-hoc constraint enforcement. Furthermore, we observe that the absolute end-effector position in the camera frame is trocar-invariant for visual servoing tasks, motivating a hierarchical architecture that decouples trocar-invariant position prediction (via diffusion) from trocar-dependent axial rotation estimation (via deterministic mapping). Designed for standard 6-DoF manipulators without specialized surgical wrists, STAR-Diff democratizes surgical automation beyond proprietary platforms. We validate our approach on multiple surgical tasks, demonstrating substantial improvements in generalization to unseen trocar configurations while maintaining near-zero RCM constraint violations.
+Automating laparoscopic surgery holds significant promise for improving surgical outcomes. While some recent works have addressed varying trocar positions, they rely on wrist-mounted cameras to implicitly infer trocar configurations and use relative pose actions without explicitly constraining the action space to the RCM manifold—potentially causing issues when low-level controllers must project infeasible commands onto valid motions. Moreover, most prior works depend on proprietary systems such as the da Vinci Surgical System with articulated EndoWrist mechanisms, which alleviate RCM constraint challenges. In contrast, we present \textbf{STAR-Diff} (\textbf{S}urgical \textbf{T}rocar-\textbf{A}daptive, \textbf{R}CM-aware \textbf{Diff}usion Policy), a novel imitation learning framework designed for standard 6-DoF manipulators without specialized surgical wrists, using only a fixed external camera. Our key contributions are: (1) \textbf{RCM-aware action space design}—we propose four parameterizations of the 4-dimensional RCM constraint manifold, categorized as fully-relative or mixed (relative-absolute), each guaranteeing constraint satisfaction by construction; and (2) \textbf{trocar-centric observation space design}—we introduce trocar-centric spatial encoding that augments RGB images with dense coordinate maps expressed in the trocar frame. For mixed parameterizations containing trocar-invariant components, we propose a hierarchical architecture where a diffusion model predicts the trocar-invariant component and a deterministic network completes the trocar-dependent component. STAR-Diff democratizes surgical automation beyond proprietary platforms, enabling generalization to unseen trocar configurations while guaranteeing zero RCM constraint violations by construction.
 \end{abstract}
 
 %==============================================================================
@@ -54,46 +56,66 @@ Automating laparoscopic surgery holds significant promise for improving surgical
 
 Minimally invasive surgery (MIS), particularly laparoscopic procedures, has revolutionized surgical practice by reducing patient trauma, hospital stays, and recovery times \cite{mack2001minimally}. However, the inherent challenges of operating through small incisions—limited field of view, reduced haptic feedback, and constrained instrument motion—place significant cognitive and physical demands on surgeons. Robot-assisted surgical systems, exemplified by the da Vinci platform \cite{intuitive2023davinci}, have emerged as transformative tools that enhance precision and ergonomics. Yet, the potential for autonomous execution of surgical subtasks remains largely unrealized in clinical settings.
 
-Recent advances in robot learning, particularly imitation learning and diffusion-based policies \cite{chi2023diffusion, zhao2023learning}, have demonstrated remarkable success in contact-rich manipulation tasks. Several works have applied these techniques to surgical automation \cite{scheikl2024movement, xu2021surrol}, achieving impressive results on benchmark tasks such as peg transfer, tissue manipulation, and suturing. However, a critical assumption pervades nearly all existing work: \textit{the trocar position is fixed and known a priori during both training and deployment}.
+Recent advances in robot learning, particularly imitation learning and diffusion-based policies \cite{chi2023diffusion, zhao2023learning}, have demonstrated remarkable success in contact-rich manipulation tasks. Several works have applied these techniques to surgical automation \cite{scheikl2024movement, xu2021surrol}, achieving impressive results on benchmark tasks such as peg transfer, tissue manipulation, and suturing. However, critical limitations in existing approaches fundamentally constrain their practical applicability.
 
-This assumption fundamentally limits the practical applicability of learned surgical policies. In clinical practice, trocar placement varies substantially based on:
+\subsection{Limitations of Existing Approaches}
+
+\textbf{(1) Implicit RCM Handling without Constraint Guarantees.} While some recent works have addressed varying trocar positions \cite{kim2024srt, kim2024srth, chiu2024suturebot}, they do so without explicitly modeling the RCM constraint manifold. These approaches typically:
 \begin{itemize}
-    \item \textbf{Patient anatomy}: Body habitus, organ size, and pathology location necessitate patient-specific port configurations \cite{reynolds2001practical}.
-    \item \textbf{Procedure type}: Different surgical procedures (cholecystectomy, appendectomy, hernia repair) require distinct trocar arrangements optimized for target anatomy access.
-    \item \textbf{Surgeon preference}: Individual surgeons develop personalized ergonomic preferences for port placement \cite{murphy2001surgeon}.
+    \item Rely on \textbf{wrist-mounted cameras} to implicitly infer trocar configurations from visual observations, rather than explicitly conditioning on trocar frame information.
+    \item Use \textbf{relative pose actions} with respect to the current end-effector pose, which does not inherently respect RCM constraints.
+    \item Do not constrain the action space to the \textbf{RCM-feasible manifold}, meaning the policy can output actions that violate the RCM constraint.
 \end{itemize}
 
-When deployed in a trocar configuration different from training, existing policies face two failure modes: (1) \textbf{workspace mismatch}, where the learned end-effector trajectories become unreachable or kinematically infeasible, and (2) \textbf{RCM constraint violation}, where the instrument axis fails to pass through the trocar point, risking tissue damage at the incision site.
+This design leads to a critical issue: when the low-level controller receives an infeasible action command that would violate the RCM constraint, it must project or clamp the command onto a feasible motion. This projection can introduce \textbf{tracking errors}, cause \textbf{discontinuous motions}, and potentially lead to \textbf{task failures}—especially in precision-critical surgical manipulation.
+
+\textbf{(2) Reliance on Specialized Hardware.} The majority of surgical automation research uses the \textbf{da Vinci Research Kit (dVRK)} \cite{kazanzides2014open}, which features 7+ DoF instruments with articulated ``wrist'' joints (EndoWrist). This redundancy significantly relaxes the RCM constraint's impact on end-effector reachability—the wrist can compensate for approach angles that would be impossible with a rigid instrument. Consequently, prior works have not needed to carefully design RCM-aware action spaces for standard manipulators.
+
+\textbf{(3) Trocar Variation in Clinical Practice.} Even for approaches that handle varying trocars implicitly, clinical practice demands robust adaptation to diverse trocar configurations based on:
+\begin{itemize}
+    \item \textbf{Patient anatomy}: Body habitus, organ size, and pathology location necessitate patient-specific port configurations \cite{reynolds2001practical}.
+    \item \textbf{Procedure type}: Different procedures require distinct trocar arrangements.
+    \item \textbf{Surgeon preference}: Individual surgeons develop personalized port placement preferences \cite{murphy2001surgeon}.
+\end{itemize}
 
 \begin{figure}[t]
     \centering
     \includegraphics[width=\columnwidth]{figures/teaser.pdf}
-    \caption{\textbf{Problem Overview.} (a) Existing surgical policies are trained and deployed with a fixed trocar position, failing when trocar placement varies. (b) STAR-Diff learns a single policy that adapts to arbitrary trocar positions by leveraging an RCM-aware action space and hierarchical architecture that decouples trocar-invariant from trocar-dependent components.}
+    \caption{\textbf{Problem Overview.} (a) Existing approaches either assume fixed trocars or handle varying trocars implicitly via wrist cameras without RCM constraint guarantees. (b) STAR-Diff explicitly parameterizes the RCM constraint manifold as the action space, guaranteeing feasibility by construction, and uses trocar-centric observation encoding with a fixed external camera.}
     \label{fig:teaser}
 \end{figure}
 
-The Remote Center of Motion (RCM) constraint is the defining kinematic characteristic of laparoscopic surgery. It requires that the instrument's longitudinal axis always passes through the trocar point, effectively reducing the instrument's degrees of freedom from 6 to 4 (excluding gripper actuation). Prior work has addressed RCM compliance through various mechanisms: hardware-based solutions using specialized kinematic designs \cite{taylor1999steady}, software-based approaches using constrained optimization \cite{sandoval2017collaborative}, and learning-based methods that incorporate RCM as a loss term \cite{lu2021super}. However, these approaches either require specialized hardware, introduce computational overhead at inference time, or fail to guarantee strict constraint satisfaction.
+\subsection{Our Setting: Democratizing Surgical Automation}
 
-In this work, we propose \textbf{STAR-Diff}, a diffusion-based imitation learning framework that achieves trocar-adaptive surgical manipulation through two key innovations:
+In this work, we target a challenging and practical setting:
 
-\textbf{(1) RCM-aware Action Space.} Rather than learning in the ambient $\SE(3)$ space and projecting onto the RCM constraint manifold post-hoc, we directly parameterize the action space as the 4-dimensional RCM constraint manifold $\Mrcm$. This ``constraint baking'' approach guarantees RCM compliance by construction, eliminating the need for runtime constraint enforcement.
+\textbf{(1) Standard 6-DoF Manipulator without EndoWrist.} We assume a general-purpose industrial manipulator (e.g., Fairino FR5) equipped with a rigid laparoscopic instrument. Without additional wrist DoF, the RCM constraint directly couples tip position, approach angle, and axial rotation through the trocar point. This makes \textbf{explicit RCM-aware action space design} essential.
 
-\textbf{(2) Hierarchical Trocar-Adaptive Architecture.} We make a crucial observation: for visual servoing tasks with a fixed camera, the desired end-effector position in world coordinates is \textit{trocar-invariant}—it depends only on the target object's visual appearance, not on where the trocar happens to be placed. This insight motivates a hierarchical decomposition:
+\textbf{(2) Fixed External Camera without Wrist Sensing.} We assume a single monocular camera mounted externally, observing the surgical workspace from a fixed viewpoint. Unlike wrist-mounted cameras that provide implicit trocar-frame observations, this configuration requires explicit handling of the observation-action frame mismatch.
+
+We choose this setting to \textbf{democratize surgical automation research}: enabling experimentation with commodity hardware rather than requiring proprietary platforms or specialized sensing.
+
+\subsection{Our Approach: STAR-Diff}
+
+STAR-Diff addresses the above limitations through:
+
+\textbf{(1) RCM-aware Action Space Design.} We directly parameterize the action space using the 4-dimensional RCM constraint manifold $\Mrcm$. We identify four candidate parameterizations:
 \begin{itemize}
-    \item A \textbf{diffusion policy} predicts the trocar-invariant absolute position $\pabs$, conditioned only on visual observations.
-    \item A \textbf{deterministic network} predicts the trocar-dependent relative rotation $\gamrel$, given the diffusion output and trocar parameters.
+    \item \textbf{Fully-relative}: Both components expressed in the trocar frame.
+    \item \textbf{Mixed (relative-absolute)}: One trocar-invariant absolute component and one trocar-dependent relative component.
 \end{itemize}
+\textbf{All parameterizations guarantee RCM compliance by construction}—the low-level controller never receives infeasible commands.
 
-This decomposition enables the diffusion model to focus on the complex, multimodal distribution of task-relevant positions without being confounded by trocar variation, while the simpler deterministic mapping handles the geometric transformation induced by different trocar placements.
+\textbf{(2) Trocar-Centric Observation Space Design.} We introduce \textbf{trocar-centric spatial encoding} that augments RGB observations with per-pixel 3D coordinates expressed in the trocar frame, explicitly bridging the observation-action frame gap without relying on wrist cameras.
 
-Our framework is designed for standard 6-DoF industrial manipulators (e.g., Fairino FR5) equipped with laparoscopic graspers, deliberately avoiding dependence on proprietary systems with specialized wrists (e.g., da Vinci EndoWrist). This design choice serves two purposes: (1) it \textit{democratizes} surgical automation research by enabling experimentation with commodity hardware, and (2) it establishes \textit{extensibility} to future systems where surgeons' manual laparoscopic data could be leveraged for policy learning.
+\textbf{(3) Architecture Design.} For fully-relative parameterizations, we use a single diffusion model. For mixed parameterizations, we propose a \textbf{hierarchical architecture} where a diffusion model predicts the trocar-invariant component and a deterministic MLP completes the trocar-dependent component.
 
-We summarize our contributions as follows:
+We summarize our contributions:
 \begin{enumerate}
-    \item We formalize the \textbf{trocar-adaptive surgical manipulation} problem and identify the geometric structure of the RCM constraint manifold.
-    \item We propose an \textbf{RCM-aware action space} that parameterizes the constraint manifold directly, guaranteeing RCM compliance without post-hoc enforcement.
-    \item We introduce a \textbf{hierarchical diffusion architecture} that decouples trocar-invariant position prediction from trocar-dependent rotation estimation.
-    \item We demonstrate that STAR-Diff achieves strong generalization to unseen trocar configurations while maintaining near-zero RCM violations on multiple surgical tasks.
+    \item We formalize \textbf{trocar-adaptive surgical manipulation} for standard 6-DoF manipulators with fixed external cameras.
+    \item We propose four \textbf{RCM-aware action space parameterizations} guaranteeing constraint satisfaction by construction.
+    \item We introduce \textbf{trocar-centric spatial encoding} for observation space design.
+    \item We present \textbf{single and hierarchical architectures} tailored to each action space category.
 \end{enumerate}
 
 %==============================================================================
@@ -104,33 +126,32 @@ We summarize our contributions as follows:
 
 \subsection{Learning-based Surgical Automation}
 
-The application of machine learning to surgical robotics has grown substantially, spanning perception, planning, and control. Early work focused on learning from demonstrations (LfD) for isolated surgical subtasks \cite{van2010superhuman, schulman2013case}. More recent approaches leverage deep learning for end-to-end visuomotor policies. Xu et al. \cite{xu2021surrol} introduced SurRoL, a comprehensive simulation platform enabling reinforcement learning for surgical tasks. ORBIT-Surgical \cite{yu2024orbit} extended this to GPU-accelerated simulation with photorealistic rendering. 
+Machine learning applications to surgical robotics span perception, planning, and control. Early work focused on learning from demonstrations for surgical subtasks \cite{van2010superhuman, schulman2013case}. Recent approaches leverage deep learning for end-to-end visuomotor policies. SurRoL \cite{xu2021surrol} provides a simulation platform for surgical RL, while ORBIT-Surgical \cite{yu2024orbit} extends this to GPU-accelerated simulation.
 
-Imitation learning has emerged as the dominant paradigm due to the difficulty of reward specification in surgery. Behavior cloning approaches have been applied to tissue manipulation \cite{scheikl2024movement}, surgical cutting \cite{thananjeyan2017multilateral}, and suturing \cite{varier2020collaborative}. The Action Chunking with Transformers (ACT) framework \cite{zhao2023learning} demonstrated that predicting action sequences rather than single actions improves temporal consistency. Diffusion Policy \cite{chi2023diffusion} further advanced the state-of-the-art by leveraging denoising diffusion models to capture multimodal action distributions.
+Imitation learning has emerged as the dominant paradigm. Diffusion Policy \cite{chi2023diffusion} advanced the state-of-the-art by capturing multimodal action distributions through denoising diffusion models.
 
-Despite these advances, \textbf{all existing methods assume fixed environmental configurations}, including trocar position. Our work addresses this limitation by explicitly conditioning on trocar parameters and designing an architecture that facilitates generalization.
+\textbf{Handling Trocar Variation.} Recent works on generative policies for surgery—SRT \cite{kim2024srt}, SRT-H \cite{kim2024srth}, and SutureBot \cite{chiu2024suturebot}—have addressed varying trocar configurations. However, these approaches:
+\begin{itemize}
+    \item Use \textbf{wrist-mounted cameras} to implicitly infer trocar frame information from visual observations, rather than explicitly conditioning on trocar parameters.
+    \item Employ \textbf{relative pose actions} without constraining outputs to the RCM-feasible manifold.
+    \item Rely on low-level controllers to \textbf{project infeasible commands} onto valid motions, which can introduce tracking errors and discontinuities.
+\end{itemize}
+
+In contrast, \textbf{STAR-Diff explicitly parameterizes the RCM constraint manifold}, guaranteeing that every policy output is feasible by construction. We also demonstrate that explicit trocar conditioning with a fixed external camera can achieve robust generalization without wrist-mounted sensing.
 
 \subsection{Remote Center of Motion Constraints}
 
-The RCM constraint is fundamental to minimally invasive surgery, ensuring that instrument motion does not traumatize tissue at the insertion point. Solutions broadly fall into three categories:
+The RCM constraint ensures instrument motion does not traumatize tissue at the insertion point. \textbf{Hardware-based} solutions use specialized kinematic designs \cite{guthart2000intuitive, taylor1999steady}. \textbf{Software-based} approaches employ constrained optimization \cite{sandoval2017collaborative} or control barrier functions \cite{selvaggio2018safe}—but these add computational overhead and may introduce tracking errors when projecting infeasible commands. \textbf{Learning-based} methods incorporate RCM as penalty terms \cite{lu2021super}, but penalties do not guarantee constraint satisfaction. 
 
-\textbf{Hardware-based RCM.} Specialized kinematic designs mechanically enforce RCM compliance. The da Vinci system uses a parallelogram mechanism \cite{guthart2000intuitive}, while other designs employ spherical joints \cite{taylor1999steady} or cable-driven architectures \cite{simaan2009design}. These solutions guarantee RCM by construction but require dedicated hardware.
+Our approach differs fundamentally: by parameterizing the RCM manifold directly as the action space, \textbf{constraint satisfaction is guaranteed by construction}, eliminating the need for runtime projection.
 
-\textbf{Software-based RCM.} For general-purpose manipulators, RCM can be enforced through control. Sandoval et al. \cite{sandoval2017collaborative} formulated RCM as a task-space constraint in a quadratic programming framework. Locke and Patel \cite{locke2007optimal} derived analytical inverse kinematics for RCM-constrained systems. Control barrier functions (CBFs) have been applied to guarantee forward invariance of the RCM constraint set \cite{selvaggio2018safe}. These approaches add computational overhead and may introduce tracking errors.
+\subsection{Spatial Encoding for Visuomotor Learning}
 
-\textbf{Learning-based RCM.} Recent work incorporates RCM into learning objectives. Lu et al. \cite{lu2021super} added RCM violation as a penalty term during policy optimization. Richter et al. \cite{richter2021open} trained policies with RCM-constrained action spaces but did not address trocar variation. Our approach differs fundamentally: by parameterizing the RCM manifold directly as the action space, \textbf{constraint satisfaction is guaranteed by construction}, not approximated through penalties or projections.
-
-\subsection{Generalization in Robot Learning}
-
-Achieving generalization across environmental variations is a central challenge in robot learning. Domain randomization \cite{tobin2017domain} and domain adaptation \cite{tzeng2020adapting} address visual domain shift. For spatial generalization, SE(3)-equivariant networks \cite{simeonov2022neural} exploit geometric symmetries. Contextual policies condition on task parameters \cite{da2012learning}, while meta-learning approaches \cite{finn2017model} enable rapid adaptation.
-
-In surgical robotics, generalization has received limited attention. Kazanzides et al. \cite{kazanzides2014open} discussed the need for adaptable surgical systems, but learning-based solutions remain scarce. The closest work is that of Shin et al. \cite{shin2019autonomous}, who varied tissue properties but not kinematic configurations. \textbf{To our knowledge, STAR-Diff is the first learning-based approach to explicitly address generalization across trocar positions.}
+Bridging observation and action coordinate frames is a key challenge. Point cloud observations \cite{ze20243d} provide 3D information. Neural descriptor fields \cite{simeonov2022neural} learn SE(3)-equivariant representations. Coordinate convolutions \cite{liu2018intriguing} append pixel coordinates as input channels. \textbf{We construct dense trocar-frame coordinate maps that embed geometric priors about the RCM constraint.}
 
 \subsection{Diffusion Models for Robot Control}
 
-Diffusion models \cite{ho2020denoising, song2020score} have transformed generative modeling and recently entered robotics. Diffusion Policy \cite{chi2023diffusion} demonstrated that framing action prediction as conditional denoising yields policies that capture multimodal behavior and exhibit strong generalization. Follow-up work has applied diffusion to diverse domains: contact-rich manipulation \cite{ze20243d}, locomotion \cite{ajay2022conditional}, and multi-task learning \cite{reuss2023goal}.
-
-Architectural variants have emerged to address specific challenges. Chi et al. \cite{chi2024universal} introduced a universal manipulation interface using diffusion. 3D Diffusion Policy \cite{ze20243d} incorporated point cloud observations for spatial reasoning. Consistency Policy \cite{prasad2024consistency} accelerated inference through distillation. Our work builds on this foundation, adapting the diffusion framework to the unique constraints of surgical manipulation through RCM-aware action spaces and hierarchical decomposition.
+Diffusion models \cite{ho2020denoising} have entered robotics through Diffusion Policy \cite{chi2023diffusion}. Extensions include 3D Diffusion Policy \cite{ze20243d} and Consistency Policy \cite{prasad2024consistency}. Our work adapts diffusion to surgical constraints through RCM-aware action spaces and trocar-centric observations.
 
 %==============================================================================
 % SECTION 3: PROBLEM FORMULATION
@@ -138,130 +159,57 @@ Architectural variants have emerged to address specific challenges. Chi et al. \
 \section{Problem Formulation}
 \label{sec:problem_formulation}
 
-\subsection{Notation and Coordinate Frames}
+\subsection{Coordinate Frames}
 
 We establish the following coordinate frames (Fig.~\ref{fig:frames}):
 \begin{itemize}
-    \item $\{S\}$: Space (world) frame, fixed.
-    \item $\{C\}$: Camera frame, fixed relative to $\{S\}$ with known transform ${}^{S}T_{C} \in \SE(3)$.
-    \item $\{R\}$: Robot base frame, fixed relative to $\{S\}$ with known transform ${}^{S}T_{R} \in \SE(3)$.
-    \item $\{T\}$: Trocar frame, centered at the trocar point $\ptrocar \in \real^3$ with $z$-axis aligned to gravity. The transform ${}^{S}T_{T}(\lambdatrocar) \in \SE(3)$ depends on trocar parameters.
-    \item $\{E\}$: End-effector (TCP) frame, located at the jaw center of the laparoscopic grasper.
+    \item $\{W\}$: World frame, fixed.
+    \item $\{C\}$: Camera frame, fixed relative to $\{W\}$ with known transform ${}^{W}T_{C} \in \SE(3)$.
+    \item $\{T\}$: Trocar frame, centered at the trocar point $\ptrocar \in \real^3$. The transform ${}^{W}T_{T}(\lambdatrocar) \in \SE(3)$ depends on trocar parameters.
+    \item $\{E\}$: End-effector frame, at the jaw center of the laparoscopic grasper.
 \end{itemize}
-
-We assume a monocular camera observing the surgical workspace, with optical axis directed toward a reference point $\mathbf{o}_{\text{ref}}$ at distance $L$ from the camera center.
 
 \subsection{Trocar Parameterization}
 
-The trocar position varies across procedures. We parameterize it using spherical coordinates centered at the reference point:
+We parameterize trocar position using spherical coordinates centered at a reference point $\mathbf{o}_{\text{ref}}$:
 \begin{equation}
     \lambdatrocar = (r, \theta, \phi) \in \real^{+} \times [0, \pi] \times [0, 2\pi),
     \label{eq:trocar_param}
 \end{equation}
-where $r$ is the radial distance from $\mathbf{o}_{\text{ref}}$, $\theta$ is the polar angle, and $\phi$ is the azimuthal angle. The trocar position in world coordinates is:
+where $r$ is radial distance, $\theta$ is polar angle, and $\phi$ is azimuthal angle. The trocar position in world coordinates is:
 \begin{equation}
     \ptrocar(\lambdatrocar) = \mathbf{o}_{\text{ref}} + r \begin{bmatrix} \sin\theta \cos\phi \\ \sin\theta \sin\phi \\ \cos\theta \end{bmatrix}.
     \label{eq:trocar_position}
 \end{equation}
 
-This parameterization captures clinically relevant trocar variation while providing a compact, continuous representation suitable for conditioning neural networks.
-
 \subsection{The RCM Constraint Manifold}
 
 \begin{definition}[Remote Center of Motion]
-A manipulator satisfies the RCM constraint at point $\ptrocar$ if the longitudinal axis of the end-effector always passes through $\ptrocar$. Formally, let $R_E \in \SO(3)$ and $\mathbf{p}_E \in \real^3$ denote the end-effector orientation and position. The RCM constraint requires:
+A manipulator satisfies the RCM constraint at point $\ptrocar$ if the instrument's longitudinal axis always passes through $\ptrocar$:
 \begin{equation}
     \mathbf{p}_E = \ptrocar + d \cdot R_E \mathbf{e}_z, \quad d \in \real,
     \label{eq:rcm_constraint}
 \end{equation}
-where $\mathbf{e}_z = [0, 0, 1]^\top$ is the instrument's longitudinal axis in the end-effector frame, and $d$ is the insertion depth (signed).
+where $R_E \in \SO(3)$ and $\mathbf{p}_E \in \real^3$ are end-effector orientation and position, $\mathbf{e}_z = [0, 0, 1]^\top$ is the instrument's longitudinal axis, and $d$ is insertion depth.
 \end{definition}
 
 \begin{proposition}[RCM Manifold Structure]
-The set of end-effector poses satisfying the RCM constraint forms a 4-dimensional submanifold of $\SE(3)$:
-\begin{equation}
-    \Mrcm(\lambdatrocar) = \{(R_E, \mathbf{p}_E) \in \SE(3) \mid \eqref{eq:rcm_constraint} \text{ holds}\}.
-\end{equation}
-This manifold is diffeomorphic to $S^2 \times S^1 \times \real$, corresponding to:
-\begin{itemize}
-    \item $S^2$: Instrument pointing direction (2 DoF)
-    \item $S^1$: Axial rotation about the instrument axis (1 DoF)
-    \item $\real$: Insertion depth (1 DoF)
-\end{itemize}
+The set of poses satisfying the RCM constraint forms a 4-dimensional submanifold $\Mrcm(\lambdatrocar) \subset \SE(3)$, diffeomorphic to $S^2 \times S^1 \times \real$, corresponding to instrument direction (2 DoF), axial rotation (1 DoF), and insertion depth (1 DoF).
 \end{proposition}
-
-\begin{proof}
-The constraint \eqref{eq:rcm_constraint} fixes the position $\mathbf{p}_E$ given $R_E$ and $d$, reducing the 6 DoF of $\SE(3)$ by 2 (the position is constrained to lie on the line through $\ptrocar$ with direction $R_E \mathbf{e}_z$). The remaining DoF correspond to: choosing the direction $R_E \mathbf{e}_z \in S^2$ (2 DoF), choosing the rotation about this axis (1 DoF, giving $S^1$), and choosing the depth $d$ (1 DoF, giving $\real$).
-\end{proof}
-
-\subsection{RCM-aware Action Space Parameterizations}
-
-Rather than learning in $\SE(3)$ and projecting onto $\Mrcm$, we seek explicit parameterizations of $\Mrcm$ as the action space. We identify four natural parameterizations:
-
-\begin{equation}
-\boxed{
-\begin{aligned}
-    \xrcm^{(1)} &= (d_{\text{rel}}, R_{\text{rel}}) & & \text{[Relative depth, Relative rotation]} \\
-    \xrcm^{(2)} &= (\gamrel, \prel) & & \text{[Relative roll, Relative position]} \\
-    \xrcm^{(3)} &= (d_{\text{rel}}, R_{\text{abs}}) & & \text{[Relative depth, Absolute rotation]} \\
-    \xrcm^{(4)} &= (\gamrel, \pabs) & & \text{[Relative roll, Absolute position]}
-\end{aligned}
-}
-\label{eq:rcm_parameterizations}
-\end{equation}
-
-Here, ``relative'' quantities are expressed in the trocar frame $\{T\}$, while ``absolute'' quantities are expressed in the world frame $\{S\}$.
-
-\begin{table}[t]
-    \centering
-    \caption{Comparison of RCM Action Space Parameterizations}
-    \label{tab:rcm_comparison}
-    \begin{tabular}{@{}lcccc@{}}
-        \toprule
-        \textbf{Property} & $\xrcm^{(1)}$ & $\xrcm^{(2)}$ & $\xrcm^{(3)}$ & $\xrcm^{(4)}$ \\
-        \midrule
-        Trocar-invariant component & \xmark & \xmark & $R_{\text{abs}}$ & $\pabs$ \\
-        Geometric interpretability & High & Medium & Low & High \\
-        Learning efficiency & Low & Low & Low & \textbf{High} \\
-        Configuration consistency & -- & -- & Poor & \textbf{Good} \\
-        \bottomrule
-    \end{tabular}
-\end{table}
-
-\textbf{Analysis.} Parameterizations $\xrcm^{(1)}$ and $\xrcm^{(2)}$ are fully trocar-relative: all components depend on $\lambdatrocar$. Consequently, a policy must learn to map trocar parameters to appropriate actions, potentially requiring extensive trocar coverage during training.
-
-Parameterizations $\xrcm^{(3)}$ and $\xrcm^{(4)}$ are partially trocar-invariant: one component (rotation or position) is expressed absolutely. This asymmetry has profound implications:
-
-\begin{proposition}[Trocar-Invariance of Absolute Position]
-\label{prop:invariance}
-For visual servoing tasks where the target is defined by visual features in a fixed camera frame, the desired absolute position $\pabs^*$ is independent of trocar parameters $\lambdatrocar$.
-\end{proposition}
-
-\begin{proof}
-Let the target object have world-frame position $\mathbf{p}_{\text{target}} \in \real^3$, determined solely by camera observations. The desired end-effector position for task completion is $\pabs^* = f_{\text{task}}(\mathbf{p}_{\text{target}})$, where $f_{\text{task}}$ encodes task-specific offsets (e.g., grasp approach). Since neither $\mathbf{p}_{\text{target}}$ nor $f_{\text{task}}$ depends on $\lambdatrocar$, the result follows.
-\end{proof}
-
-While $\xrcm^{(3)}$ also contains a trocar-invariant component ($R_{\text{abs}}$), it suffers from \textbf{configuration inconsistency}: the same $R_{\text{abs}}$ corresponds to vastly different instrument configurations depending on $\lambdatrocar$. This makes learning difficult, as similar rotation targets yield dissimilar physical behaviors.
-
-In contrast, $\xrcm^{(4)}$ exhibits \textbf{configuration consistency}: the same $\pabs$ corresponds to similar instrument tip positions regardless of $\lambdatrocar$. The only variation is in the instrument's approach angle, which is captured by the trocar-dependent $\gamrel$.
-
-Based on this analysis, we adopt $\xrcm^{(4)} = (\gamrel, \pabs)$ as our action space.
 
 \subsection{Problem Statement}
 
-We now state the trocar-adaptive surgical imitation learning problem:
-
 \textbf{Given:}
 \begin{itemize}
-    \item A dataset $\mathcal{D} = \{(\tau_i, \lambda_i)\}_{i=1}^N$ of expert demonstrations, where $\tau_i = \{(o_t, a_t, g_t)\}_{t=1}^{T_i}$ contains observations $o_t$ (images), actions $a_t \in \xrcm^{(4)}$, and gripper states $g_t$, collected under trocar configuration $\lambda_i$.
+    \item A dataset $\mathcal{D} = \{(\tau_i, \lambda_i)\}_{i=1}^N$ of expert demonstrations under various trocar configurations.
     \item A distribution $p(\lambdatrocar)$ over trocar configurations.
 \end{itemize}
 
 \textbf{Find:} A policy $\pi(a \mid o, \lambdatrocar)$ that:
 \begin{enumerate}
-    \item Maximizes task success rate across $p(\lambdatrocar)$, including configurations not seen during training.
+    \item Maximizes task success across $p(\lambdatrocar)$, including unseen configurations.
     \item Guarantees RCM constraint satisfaction by construction.
-    \item Enables efficient inference for real-time control.
+    \item Enables efficient real-time inference.
 \end{enumerate}
 
 %==============================================================================
@@ -270,229 +218,181 @@ We now state the trocar-adaptive surgical imitation learning problem:
 \section{Methodology}
 \label{sec:methodology}
 
-We present STAR-Diff, a hierarchical diffusion-based framework for trocar-adaptive surgical manipulation. Our approach exploits the decomposition of the RCM action space $\xrcm^{(4)} = (\gamrel, \pabs)$ into trocar-invariant (position) and trocar-dependent (rotation) components.
+We present STAR-Diff, a diffusion-based framework for trocar-adaptive surgical manipulation. Our methodology centers on two design pillars: \textbf{RCM-aware action space} and \textbf{trocar-centric observation space}, with architecture choices tailored to each action space category.
 
-\subsection{Architecture Overview}
+\subsection{Overview}
 
-STAR-Diff comprises two modules (Fig.~\ref{fig:architecture}):
-
+STAR-Diff consists of three components (Fig.~\ref{fig:architecture}):
 \begin{enumerate}
-    \item \textbf{Absolute Position Diffusion Policy} $\pi_{\text{abs}}$: A conditional diffusion model that predicts future absolute positions $\pabs^{t+1:t+H}$ and gripper actions $g^{t+1:t+H}$, conditioned on visual observations $I^{t-T_o:t}$ and position history $\pabs^{t-T_o:t}$.
-    
-    \item \textbf{Relative Rotation Network} $f_{\text{rel}}$: A deterministic MLP that predicts relative roll $\gamrel^{t+1:t+H}$, conditioned on the diffusion output, trocar parameters $\lambdatrocar$, and roll history $\gamrel^{t-T_o:t}$.
+    \item \textbf{RCM-aware Action Space}: Four parameterizations of the RCM constraint manifold, categorized as fully-relative or mixed.
+    \item \textbf{Trocar-Centric Observation Space}: RGB images augmented with dense trocar-frame coordinate maps.
+    \item \textbf{Policy Architecture}: Single model for fully-relative; hierarchical model for mixed action spaces.
 \end{enumerate}
-
-Here, $T_o$ is the observation horizon and $H$ is the prediction (action chunk) horizon.
 
 \begin{figure}[t]
     \centering
     \includegraphics[width=\columnwidth]{figures/architecture.pdf}
-    \caption{\textbf{STAR-Diff Architecture.} The diffusion policy predicts trocar-invariant absolute positions from visual observations. The deterministic network then computes trocar-dependent relative rotations conditioned on the diffusion output and trocar parameters.}
+    \caption{\textbf{STAR-Diff Architecture.} (Left) Single architecture for fully-relative action spaces. (Right) Hierarchical architecture for mixed action spaces.}
     \label{fig:architecture}
 \end{figure}
 
-\subsubsection{Rationale for Hierarchical Decomposition}
+\subsection{RCM-aware Action Space Design}
+\label{subsec:action_space}
 
-The decomposition is motivated by two observations:
+We directly parameterize the action space using the RCM constraint manifold. We identify four candidate parameterizations:
 
-\textit{Observation 1:} Absolute position prediction benefits from generative modeling. End-effector trajectories in manipulation tasks often exhibit multimodality (e.g., multiple valid grasp approaches) and complex temporal correlations. Diffusion models excel at capturing such distributions \cite{chi2023diffusion}.
-
-\textit{Observation 2:} Given $\pabs$ and $\lambdatrocar$, the relative roll $\gamrel$ is nearly deterministic. Once the tip position and trocar location are known, the instrument's approach direction is constrained to pass through both points. The only remaining freedom is axial rotation, which is typically dictated by task requirements (e.g., gripper orientation for grasping) rather than exhibiting multimodality.
-
-\subsection{Absolute Position Diffusion Policy}
-
-We adopt the DDPM framework \cite{ho2020denoising} for position prediction. The diffusion model learns to reverse a forward noising process that gradually corrupts action sequences.
-
-\subsubsection{Forward Process}
-
-Given a clean action sequence $\mathbf{a}_0 = [\pabs^{t+1:t+H}, g^{t+1:t+H}]$, the forward process produces increasingly noisy versions:
 \begin{equation}
-    q(\mathbf{a}_k \mid \mathbf{a}_{k-1}) = \mathcal{N}(\mathbf{a}_k; \sqrt{1-\beta_k} \mathbf{a}_{k-1}, \beta_k \mathbf{I}),
-\end{equation}
-where $\{\beta_k\}_{k=1}^K$ is the noise schedule with $K$ diffusion steps. Using the reparameterization $\alpha_k = 1 - \beta_k$ and $\bar{\alpha}_k = \prod_{i=1}^k \alpha_i$, we can sample $\mathbf{a}_k$ directly:
-\begin{equation}
-    \mathbf{a}_k = \sqrt{\bar{\alpha}_k} \mathbf{a}_0 + \sqrt{1-\bar{\alpha}_k} \bm{\epsilon}, \quad \bm{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I}).
+\boxed{
+\begin{aligned}
+    &\textbf{Fully-Relative:} \\
+    &\quad \xrcm^{(1)} = (d_{\text{rel}}, R_{\text{rel}}) & & \text{[Depth, Rotation]} \\
+    &\quad \xrcm^{(2)} = (\gamrel, \prel) & & \text{[Roll, Position]} \\[0.5em]
+    &\textbf{Mixed (Relative, Absolute):} \\
+    &\quad \xrcm^{(3)} = (d_{\text{rel}}, R_{\text{abs}}) & & \text{[Depth, Rotation]} \\
+    &\quad \xrcm^{(4)} = (\gamrel, \pabs) & & \text{[Roll, Position]}
+\end{aligned}
+}
+\label{eq:rcm_parameterizations}
 \end{equation}
 
-\subsubsection{Reverse Process}
+``Relative'' quantities are in the trocar frame $\{T\}$; ``absolute'' quantities are in the world frame $\{W\}$.
 
-The reverse process learns to denoise, parameterized by a neural network $\epsilon_\theta$:
-\begin{equation}
-    p_\theta(\mathbf{a}_{k-1} \mid \mathbf{a}_k, \mathbf{c}) = \mathcal{N}(\mathbf{a}_{k-1}; \bm{\mu}_\theta(\mathbf{a}_k, \mathbf{c}, k), \sigma_k^2 \mathbf{I}),
-\end{equation}
-where $\mathbf{c} = (I^{t-T_o:t}, \pabs^{t-T_o:t})$ is the conditioning information.
+\subsubsection{Fully-Relative Parameterizations}
 
-\subsubsection{Training Objective}
+\textbf{$\xrcm^{(1)} = (d_{\text{rel}}, R_{\text{rel}})$}: Insertion depth and rotation in the trocar frame.
 
-We train by minimizing the simplified denoising objective:
-\begin{equation}
-    \mathcal{L}_{\text{abs}} = \mathbb{E}_{\mathbf{a}_0, k, \bm{\epsilon}} \left[ \| \bm{\epsilon} - \epsilon_\theta(\mathbf{a}_k, \mathbf{c}, k) \|^2 \right].
-    \label{eq:diffusion_loss}
-\end{equation}
+\textbf{$\xrcm^{(2)} = (\gamrel, \prel)$}: Axial roll and position in the trocar frame.
 
-\subsubsection{Network Architecture}
+Both components are trocar-dependent: the same task state corresponds to different action values for different trocar placements.
 
-The noise prediction network $\epsilon_\theta$ follows the conditional U-Net architecture of \cite{chi2023diffusion}:
+\subsubsection{Mixed Parameterizations}
 
-\textbf{Vision Encoder.} Images $I^{t-T_o:t}$ are encoded using a ResNet-18 backbone, pretrained on ImageNet and fine-tuned during training. We apply spatial softmax pooling to obtain a fixed-dimensional feature vector per frame:
-\begin{equation}
-    \mathbf{v}_t = \text{SpatialSoftmax}(\text{ResNet}(I_t)) \in \real^{d_v}.
-\end{equation}
+\textbf{$\xrcm^{(3)} = (d_{\text{rel}}, R_{\text{abs}})$}: Relative depth with absolute rotation.
 
-\textbf{State Encoder.} Position history $\pabs^{t-T_o:t}$ is encoded via a 1D convolutional network:
-\begin{equation}
-    \mathbf{s} = \text{Conv1D}(\pabs^{t-T_o:t}) \in \real^{d_s}.
-\end{equation}
+\textbf{$\xrcm^{(4)} = (\gamrel, \pabs)$}: Relative roll with absolute position.
 
-\textbf{Conditional U-Net.} The concatenated condition $\mathbf{c} = [\mathbf{v}_{t-T_o:t}, \mathbf{s}]$ is injected into a 1D U-Net that operates on the temporal dimension of action sequences. Diffusion timestep $k$ is encoded via sinusoidal embeddings and added to intermediate features.
+Mixed parameterizations contain one \textbf{trocar-invariant} component (absolute) and one \textbf{trocar-dependent} component (relative).
 
-\subsubsection{Inference}
+\begin{table}[t]
+    \centering
+    \caption{Properties of RCM Action Space Parameterizations}
+    \label{tab:rcm_comparison}
+    \begin{tabular}{@{}lcccc@{}}
+        \toprule
+        & $\xrcm^{(1)}$ & $\xrcm^{(2)}$ & $\xrcm^{(3)}$ & $\xrcm^{(4)}$ \\
+        \midrule
+        Category & \multicolumn{2}{c}{Fully-Relative} & \multicolumn{2}{c}{Mixed} \\
+        Trocar-invariant & \xmark & \xmark & $R_{\text{abs}}$ & $\pabs$ \\
+        Config. consistency & -- & -- & Poor & Good \\
+        Architecture & Single & Single & Hier. & Hier. \\
+        \bottomrule
+    \end{tabular}
+\end{table}
 
-At test time, we sample actions via iterative denoising:
-\begin{equation}
-    \mathbf{a}_{k-1} = \frac{1}{\sqrt{\alpha_k}} \left( \mathbf{a}_k - \frac{\beta_k}{\sqrt{1-\bar{\alpha}_k}} \epsilon_\theta(\mathbf{a}_k, \mathbf{c}, k) \right) + \sigma_k \mathbf{z},
-\end{equation}
-where $\mathbf{z} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ for $k > 1$ and $\mathbf{z} = \mathbf{0}$ for $k=1$. We use DDIM \cite{song2020denoising} for accelerated sampling with fewer steps.
+\subsubsection{Trocar-Invariance Analysis}
 
-\subsection{Relative Rotation Network}
+\begin{proposition}[Trocar-Invariance of Absolute Position]
+\label{prop:invariance}
+For visual servoing tasks where the target is defined by visual features in a fixed camera frame, the desired absolute position $\pabs^*$ is independent of trocar parameters $\lambdatrocar$.
+\end{proposition}
 
-The relative roll network $f_\phi$ is a deterministic MLP that completes the action by predicting trocar-dependent components.
+$\xrcm^{(3)}$ exhibits \textbf{configuration inconsistency}: the same absolute rotation corresponds to different physical configurations depending on $\lambdatrocar$. $\xrcm^{(4)}$ exhibits \textbf{configuration consistency}: the same $\pabs$ corresponds to similar tip positions regardless of trocar placement.
 
-\subsubsection{Input Representation}
-
-Given the diffusion output $\pabs^{t+1:t+H}$, trocar parameters $\lambdatrocar$, and roll history $\gamrel^{t-T_o:t}$, we construct the input:
-\begin{equation}
-    \mathbf{x}_{\text{rel}} = [\pabs^{t+1:t+H}, \text{Embed}(\lambdatrocar), \gamrel^{t-T_o:t}],
-\end{equation}
-where $\text{Embed}(\cdot)$ is a learnable embedding for trocar parameters.
-
-\subsubsection{Architecture}
-
-The network $f_\phi$ consists of:
-\begin{itemize}
-    \item Linear projection: $\mathbf{x}_{\text{rel}} \mapsto \real^{256}$
-    \item 3 residual MLP blocks with LayerNorm and GELU activation
-    \item Output projection: $\real^{256} \mapsto \real^{H}$ (predicting $\gamrel^{t+1:t+H}$)
-\end{itemize}
-
-\subsubsection{Training}
-
-The rotation network is trained jointly with the diffusion policy:
-\begin{equation}
-    \mathcal{L}_{\text{rel}} = \mathbb{E} \left[ \| \gamrel^{t+1:t+H} - f_\phi(\pabs^{t+1:t+H}, \lambdatrocar, \gamrel^{t-T_o:t}) \|^2 \right].
-\end{equation}
-
-The total loss is:
-\begin{equation}
-    \mathcal{L} = \mathcal{L}_{\text{abs}} + \lambda \mathcal{L}_{\text{rel}},
-\end{equation}
-where $\lambda$ balances the two terms (we use $\lambda = 0.1$).
-
-\subsection{Action Execution via Forward Kinematics}
-
-Given the predicted RCM action $(\gamrel^{t+1}, \pabs^{t+1})$, we recover the full end-effector pose for robot control:
-
-\begin{algorithm}[t]
-\caption{RCM Action to End-Effector Pose}
-\label{alg:fk}
-\begin{algorithmic}[1]
-\REQUIRE Predicted action $(\gamrel, \pabs)$, trocar parameters $\lambdatrocar$
-\ENSURE End-effector pose $(R_E, \mathbf{p}_E)$
-\STATE Compute trocar position: $\ptrocar \leftarrow \text{Eq.}~\eqref{eq:trocar_position}$
-\STATE Compute instrument direction: $\mathbf{v} \leftarrow \frac{\pabs - \ptrocar}{\|\pabs - \ptrocar\|}$
-\STATE Compute base rotation aligning $\mathbf{e}_z$ to $\mathbf{v}$:
-\STATE \quad $R_{\text{base}} \leftarrow \text{RotationAlign}(\mathbf{e}_z, \mathbf{v})$
-\STATE Apply axial rotation:
-\STATE \quad $R_E \leftarrow R_{\text{base}} \cdot R_z(\gamrel)$
-\STATE Set position: $\mathbf{p}_E \leftarrow \pabs$
-\RETURN $(R_E, \mathbf{p}_E)$
-\end{algorithmic}
-\end{algorithm}
-
-The $\text{RotationAlign}(\mathbf{a}, \mathbf{b})$ function computes a rotation matrix that maps unit vector $\mathbf{a}$ to unit vector $\mathbf{b}$ using Rodrigues' formula:
-\begin{equation}
-    R = I + [\mathbf{k}]_\times + [\mathbf{k}]_\times^2 \frac{1}{1 + \mathbf{a} \cdot \mathbf{b}},
-\end{equation}
-where $\mathbf{k} = \mathbf{a} \times \mathbf{b}$ and $[\cdot]_\times$ denotes the skew-symmetric matrix.
-
-Finally, we compute joint commands via inverse kinematics:
-\begin{equation}
-    \mathbf{q} = \text{IK}(R_E, \mathbf{p}_E),
-\end{equation}
-using a Jacobian-based iterative solver with the current configuration as the initial guess.
-
-\subsection{RCM Constraint Guarantee}
+\subsubsection{RCM Constraint Guarantee}
 
 \begin{theorem}[RCM Compliance by Construction]
-Any action $(\gamrel, \pabs) \in \real \times \real^3$ produced by STAR-Diff, when converted to an end-effector pose via Algorithm~\ref{alg:fk}, satisfies the RCM constraint \eqref{eq:rcm_constraint}.
+Any action produced using $\xrcm^{(1)}$--$\xrcm^{(4)}$, when converted to an end-effector pose via the transformations in Appendix~\ref{app:action_transform}, satisfies the RCM constraint \eqref{eq:rcm_constraint}.
 \end{theorem}
 
-\begin{proof}
-By construction, $\mathbf{p}_E = \pabs$ and the instrument direction is $\mathbf{v} = (\pabs - \ptrocar) / \|\pabs - \ptrocar\|$. Thus:
+This guarantee is \textit{unconditional}: regardless of neural network outputs, the resulting pose always satisfies RCM. No runtime projection is needed.
+
+\subsection{Trocar-Centric Observation Space Design}
+\label{subsec:observation_space}
+
+We address the observation-action frame mismatch through trocar-centric spatial encoding.
+
+\subsubsection{Trocar Parameter Conditioning}
+
+The trocar configuration $\lambdatrocar = (r, \theta, \phi)$ is explicitly provided:
 \begin{equation}
-    \mathbf{p}_E = \ptrocar + \|\pabs - \ptrocar\| \cdot \mathbf{v} = \ptrocar + d \cdot R_E \mathbf{e}_z,
-\end{equation}
-where $d = \|\pabs - \ptrocar\|$ and $R_E \mathbf{e}_z = \mathbf{v}$ by the alignment construction. This matches \eqref{eq:rcm_constraint}.
-\end{proof}
-
-This guarantee is \textit{unconditional}: regardless of the values predicted by the neural networks, the resulting pose always satisfies RCM. This contrasts with penalty-based or projection-based approaches where constraint satisfaction is approximate.
-
-\subsection{Training Data Collection}
-
-To enable trocar generalization, we collect demonstrations across a distribution of trocar configurations.
-
-\subsubsection{Trocar Sampling}
-
-We sample trocar parameters from a uniform distribution:
-\begin{equation}
-    \lambdatrocar \sim \text{Uniform}([\underline{r}, \bar{r}] \times [\underline{\theta}, \bar{\theta}] \times [\underline{\phi}, \bar{\phi}]).
+    \mathbf{e}_\lambda = \text{MLP}_{\text{embed}}(\lambdatrocar) \in \real^{d_\lambda}.
 \end{equation}
 
-Based on clinical guidelines for laparoscopic port placement \cite{reynolds2001practical}, we set:
-\begin{itemize}
-    \item $r \in [0, 5]$ cm (radial variation)
-    \item $\theta \in [60°, 120°]$ (polar angle, avoiding extreme approach angles)
-    \item $\phi \in [0°, 360°]$ (full azimuthal coverage)
-\end{itemize}
+\subsubsection{Dense Trocar-Frame Coordinate Maps}
 
-\subsubsection{Demonstration Protocol}
+We augment RGB observations with per-pixel 3D coordinates in the trocar frame.
 
-For each sampled $\lambdatrocar$:
+\textbf{Step 1: 2D-to-3D Lifting.} Project each pixel to camera-frame coordinates:
+\begin{equation}
+    \Pcam(u, v) = Z(u, v) \cdot K^{-1} \begin{bmatrix} u \\ v \\ 1 \end{bmatrix}.
+\end{equation}
+
+\textbf{Step 2: Trocar-Centric Transformation.}
+\begin{equation}
+    \Ptro(u, v) = R_{T \leftarrow C} \cdot \Pcam(u, v) + t_{T \leftarrow C}.
+\end{equation}
+
+\textbf{Step 3: Augmented Observation.}
+\begin{equation}
+    \mathbf{O}_{\text{aug}} = \text{Concat}(\mathbf{I}_{\text{RGB}}, \Ptro^{\text{norm}}) \in \real^{H \times W \times 6}.
+    \label{eq:augmented_obs}
+\end{equation}
+
+\subsection{Policy Architecture}
+\label{subsec:architecture}
+
+\subsubsection{Single Architecture for Fully-Relative Action Spaces}
+
+For $\xrcm^{(1)}$ and $\xrcm^{(2)}$, a single diffusion model predicts the complete action:
+\begin{equation}
+    \pi_{\text{single}}: (\mathbf{O}_{\text{aug}}, \mathbf{x}_{\text{history}}, \lambdatrocar) \mapsto \xrcm^{(k)}, \quad k \in \{1, 2\}
+\end{equation}
+
+\subsubsection{Hierarchical Architecture for Mixed Action Spaces}
+
+For $\xrcm^{(3)}$ and $\xrcm^{(4)}$, we use a two-stage hierarchical architecture:
+
+\textbf{Stage 1: Absolute Component (Diffusion Model)}
+\begin{equation}
+    \pi_{\text{abs}}: (\mathbf{O}_{\text{aug}}, \mathbf{x}_{\text{abs}}^{\text{history}}) \mapsto \mathbf{x}_{\text{abs}}^{t+1:t+H}
+\end{equation}
+Trocar parameters are \textbf{not conditioned} since the absolute component is trocar-invariant.
+
+\textbf{Stage 2: Relative Component (Deterministic MLP)}
+\begin{equation}
+    f_{\text{rel}}: (\mathbf{O}_{\text{aug}}, \mathbf{x}_{\text{abs}}^{t+1:t+H}, \mathbf{x}_{\text{rel}}^{\text{history}}, \lambdatrocar) \mapsto \mathbf{x}_{\text{rel}}^{t+1:t+H}
+\end{equation}
+
+\subsection{Diffusion Policy Details}
+
+We adopt DDPM \cite{ho2020denoising}. The noise prediction network $\epsilon_\theta$ is trained with:
+\begin{equation}
+    \mathcal{L}_{\text{diff}} = \mathbb{E}_{\mathbf{a}_0, k, \bm{\epsilon}} \left[ \| \bm{\epsilon} - \epsilon_\theta(\mathbf{a}_k, \mathbf{c}, k) \|^2 \right].
+\end{equation}
+
+For hierarchical architectures, the MLP is trained with:
+\begin{equation}
+    \mathcal{L}_{\text{rel}} = \mathbb{E} \left[ \| \mathbf{x}_{\text{rel}}^{t+1:t+H} - f_{\text{rel}}(\cdot) \|^2 \right].
+\end{equation}
+
+Total loss: $\mathcal{L} = \mathcal{L}_{\text{diff}} + \lambda \mathcal{L}_{\text{rel}}$ with $\lambda = 0.1$.
+
+\subsection{Action Execution via Low-Level Control}
+\label{subsec:action_execution}
+
+\subsubsection{Action-to-Pose Transformation}
+
+All four parameterizations are converted to $\SE(3)$ poses via $\mathcal{T}: \xrcm^{(k)} \times \lambdatrocar \rightarrow \SE(3)$ (Appendix~\ref{app:action_transform}).
+
+\subsubsection{Low-Level Control}
+
+Given desired pose $(R_E^*, \mathbf{p}_E^*)$:
 \begin{enumerate}
-    \item Configure the simulation/robot with the corresponding trocar position.
-    \item An expert teleoperator performs the task using a 6-DoF input device.
-    \item Record synchronized streams: images (30 Hz), end-effector pose, gripper state.
-    \item Convert poses to RCM action space representation $(\gamrel, \pabs)$.
+    \item \textbf{Inverse Kinematics}: $\mathbf{q}^* = \text{IK}(R_E^*, \mathbf{p}_E^*; \mathbf{q}_{\text{current}})$
+    \item \textbf{Joint Space Controller}: $\bm{\tau} = K_p (\mathbf{q}^* - \mathbf{q}) + K_d (\dot{\mathbf{q}}^* - \dot{\mathbf{q}})$
 \end{enumerate}
 
-We collect 20-30 demonstrations per trocar configuration across 10-15 configurations per task, yielding 200-450 demonstrations per task.
-
-\subsection{Implementation Details}
-
-\textbf{Network Hyperparameters.}
-\begin{itemize}
-    \item Vision encoder: ResNet-18, output dimension $d_v = 512$
-    \item State encoder: 3-layer Conv1D, output dimension $d_s = 256$
-    \item U-Net: 4 downsampling/upsampling blocks, base channels 256
-    \item Rotation MLP: 3 residual blocks, hidden dimension 256
-\end{itemize}
-
-\textbf{Diffusion Hyperparameters.}
-\begin{itemize}
-    \item Diffusion steps: $K = 100$ (training), 10 (DDIM inference)
-    \item Noise schedule: Cosine \cite{nichol2021improved}
-    \item Observation horizon: $T_o = 2$
-    \item Prediction horizon: $H = 16$
-    \item Action execution: First 8 actions executed before replanning
-\end{itemize}
-
-\textbf{Training.}
-\begin{itemize}
-    \item Optimizer: AdamW, learning rate $1 \times 10^{-4}$, weight decay $1 \times 10^{-6}$
-    \item Batch size: 256
-    \item Training iterations: 100K
-    \item Data augmentation: Random crop, color jitter, Gaussian noise
-\end{itemize}
+Since all policy outputs lie on the RCM manifold by construction, no projection or clamping is required.
 
 %==============================================================================
 % SECTION 5: EXPERIMENTS
@@ -500,113 +400,74 @@ We collect 20-30 demonstrations per trocar configuration across 10-15 configurat
 \section{Experiments}
 \label{sec:experiments}
 
-We design a unified experiment to answer three research questions through systematic comparison:
+We design experiments to evaluate:
 \begin{itemize}
-    \item \textbf{RQ1}: Does STAR-Diff generalize to unseen trocar positions?
-    \item \textbf{RQ2}: How effective is the RCM-aware action space compared to naive action spaces?
-    \item \textbf{RQ3}: Does the hierarchical architecture provide benefits over a single-model approach?
+    \item \textbf{RQ1}: Generalization to unseen trocar positions
+    \item \textbf{RQ2}: Comparison of RCM action space parameterizations
+    \item \textbf{RQ3}: Effect of trocar-centric spatial encoding
+    \item \textbf{RQ4}: Single vs. hierarchical architecture for mixed action spaces
 \end{itemize}
-
-By comparing all methods on the same task with the unified metric of \textbf{task success rate} across seen and unseen trocar configurations, we can simultaneously address all research questions.
 
 \subsection{Experimental Setup}
 
-\subsubsection{Task: Peg Transfer}
+\subsubsection{Task}
 
-We evaluate on the \textbf{Peg Transfer} task from the Fundamentals of Laparoscopic Surgery (FLS) benchmark \cite{peters2004development}. This task requires picking up a peg from one board and transferring it to a target location on another board. It tests fundamental skills including depth perception, hand-eye coordination, and precise manipulation under RCM constraints.
-
-The task is implemented in a simulation environment based on SurRoL \cite{xu2021surrol} with realistic physics and visual rendering. The robot is a 6-DoF Fairino FR5 manipulator equipped with a laparoscopic grasper.
+We evaluate on \textbf{Peg Transfer} from the FLS benchmark \cite{peters2004development}, implemented in SurRoL \cite{xu2021surrol} simulation with a 6-DoF Fairino FR5 and laparoscopic grasper, observed by a fixed RGB-D camera.
 
 \subsubsection{Trocar Configuration}
 
-We define a trocar distribution covering clinically relevant variations:
+12 trocar configurations total:
 \begin{itemize}
-    \item Radial distance: $r \in [0, 5]$ cm
-    \item Polar angle: $\theta \in [70°, 110°]$
-    \item Azimuthal angle: $\phi \in [0°, 360°]$
+    \item \textbf{Training}: 8 configurations (67\%)
+    \item \textbf{Test (Seen)}: Same 8 as training
+    \item \textbf{Test (Unseen)}: 4 held-out configurations (33\%)
 \end{itemize}
 
-We discretize this space into 12 trocar configurations:
-\begin{itemize}
-    \item \textbf{Training set}: 8 configurations (67\%), uniformly distributed
-    \item \textbf{Test set (Seen)}: Same 8 configurations as training
-    \item \textbf{Test set (Unseen)}: 4 held-out configurations (33\%), including boundary cases
-\end{itemize}
+\subsubsection{Metrics}
 
-\subsubsection{Data Collection}
+\textbf{Task Success Rate (SR)}: Percentage of successful transfers within 60 seconds (30 trials per configuration).
 
-Expert demonstrations are collected via teleoperation using a SpaceMouse 6-DoF input device. For each trocar configuration in the training set, we collect 30 successful demonstrations, yielding 240 total demonstrations recorded at 30 Hz (RGB images at 256$\times$256, end-effector poses, gripper states).
+\textbf{Generalization Gap}: $\Delta_{\text{gen}} = \text{SR}_{\text{seen}} - \text{SR}_{\text{unseen}}$.
 
-\subsubsection{Evaluation Protocol}
-
-All methods are evaluated using \textbf{Task Success Rate (SR)}: the percentage of trials where the peg is successfully transferred within 60 seconds. Each method is evaluated over 30 trials per trocar configuration (240 trials for seen, 120 trials for unseen).
-
-We define the \textbf{generalization gap} as:
-\begin{equation}
-    \Delta_{\text{gen}} = \text{SR}_{\text{seen}} - \text{SR}_{\text{unseen}}.
-\end{equation}
-A smaller gap indicates better generalization to novel trocar configurations.
-
-\subsection{Methods Compared}
-
-To systematically isolate the effects of action space design and architecture, we compare 8 methods organized into three groups (Table~\ref{tab:methods}).
+\subsection{Methods}
 
 \begin{table}[t]
     \centering
-    \caption{Summary of Compared Methods}
+    \caption{Compared Methods}
     \label{tab:methods}
     \resizebox{\columnwidth}{!}{
     \begin{tabular}{@{}llccc@{}}
         \toprule
-        \textbf{Group} & \textbf{Method} & \textbf{Action Space} & \textbf{RCM} & \textbf{Arch.} \\
+        \textbf{Group} & \textbf{Method} & \textbf{Action Space} & \textbf{Obs.} & \textbf{Arch.} \\
         \midrule
-        \multirow{2}{*}{\textit{Naive}} 
-        & DP-EE & $\SE(3)$ & None & Single \\
-        & DP-EE-Proj & $\SE(3)$ & Post-hoc & Single \\
+        \multirow{2}{*}{\textit{Baselines}} 
+        & DP-SE3 & $\SE(3)$ & RGB & Single \\
+        & DP-SE3-Proj & $\SE(3)$ + Proj & RGB & Single \\
         \midrule
-        \multirow{4}{*}{\textit{RCM Action Spaces}} 
-        & DP-RCM-1 & $(d_{\text{rel}}, R_{\text{rel}})$ & By constr. & Single \\
-        & DP-RCM-2 & $(\gamrel, \prel)$ & By constr. & Single \\
-        & DP-RCM-3 & $(d_{\text{rel}}, R_{\text{abs}})$ & By constr. & Single \\
-        & DP-RCM-4 & $(\gamrel, \pabs)$ & By constr. & Single \\
+        \multirow{2}{*}{\textit{Fully-Rel.}} 
+        & STAR-1 & $\xrcm^{(1)}$ & RGB+TC & Single \\
+        & STAR-2 & $\xrcm^{(2)}$ & RGB+TC & Single \\
         \midrule
-        \multirow{2}{*}{\textit{Ours}} 
-        & STAR-Diff-Single & $(\gamrel, \pabs)$ & By constr. & Single \\
-        & \textbf{STAR-Diff} & $(\gamrel, \pabs)$ & By constr. & \textbf{Hier.} \\
+        \multirow{4}{*}{\textit{Mixed}} 
+        & STAR-3-S & $\xrcm^{(3)}$ & RGB+TC & Single \\
+        & STAR-3-H & $\xrcm^{(3)}$ & RGB+TC & Hier. \\
+        & STAR-4-S & $\xrcm^{(4)}$ & RGB+TC & Single \\
+        & STAR-4-H & $\xrcm^{(4)}$ & RGB+TC & Hier. \\
         \bottomrule
     \end{tabular}
     }
-    \vspace{0.5em}
+    \vspace{0.3em}
     
-    {\footnotesize All methods use Diffusion Policy as the base architecture. ``By constr.'' = RCM satisfied by construction. ``Hier.'' = Hierarchical (diffusion + MLP).}
+    {\footnotesize TC: Trocar-centric coordinates. S: Single. H: Hierarchical.}
 \end{table}
 
-\textbf{Group 1: Naive Action Spaces.}
-\begin{itemize}
-    \item \textbf{DP-EE}: Vanilla Diffusion Policy predicting end-effector pose in $\SE(3)$. No RCM handling.
-    \item \textbf{DP-EE-Proj}: Same as DP-EE, but with post-hoc projection onto the RCM constraint manifold at execution time.
-\end{itemize}
+\textbf{Baselines}: DP-SE3 (Diffusion Policy in $\SE(3)$) and DP-SE3-Proj (with post-hoc RCM projection).
 
-\textbf{Group 2: RCM Action Spaces (Single Model).} Four variants corresponding to the parameterizations in Eq.~\eqref{eq:rcm_parameterizations}:
-\begin{itemize}
-    \item \textbf{DP-RCM-1}: $\xrcm^{(1)} = (d_{\text{rel}}, R_{\text{rel}})$ — fully relative, depth + rotation.
-    \item \textbf{DP-RCM-2}: $\xrcm^{(2)} = (\gamrel, \prel)$ — fully relative, roll + position.
-    \item \textbf{DP-RCM-3}: $\xrcm^{(3)} = (d_{\text{rel}}, R_{\text{abs}})$ — mixed, depth relative + rotation absolute.
-    \item \textbf{DP-RCM-4}: $\xrcm^{(4)} = (\gamrel, \pabs)$ — mixed, roll relative + position absolute.
-\end{itemize}
-All use a single diffusion model conditioned on trocar parameters $\lambdatrocar$.
+\textbf{Fully-Relative}: STAR-1 ($\xrcm^{(1)}$) and STAR-2 ($\xrcm^{(2)}$) with single architecture.
 
-\textbf{Group 3: Our Methods.}
-\begin{itemize}
-    \item \textbf{STAR-Diff-Single}: Uses $\xrcm^{(4)}$ with a single diffusion model (ablation for RQ3).
-    \item \textbf{STAR-Diff}: Uses $\xrcm^{(4)}$ with hierarchical architecture—diffusion for $\pabs$, deterministic MLP for $\gamrel$.
-\end{itemize}
+\textbf{Mixed}: STAR-3-S/H ($\xrcm^{(3)}$) and STAR-4-S/H ($\xrcm^{(4)}$) with single and hierarchical architectures.
 
-Note that \textbf{STAR-Diff-Single} and \textbf{DP-RCM-4} are identical, listed in both groups to clarify comparisons.
-
-\subsection{Results}
-
-Table~\ref{tab:main_results} presents the unified comparison across all methods.
+\subsection{Main Results}
 
 \begin{table}[t]
     \centering
@@ -617,113 +478,43 @@ Table~\ref{tab:main_results} presents the unified comparison across all methods.
         \toprule
         \textbf{Group} & \textbf{Method} & \textbf{Seen}$\uparrow$ & \textbf{Unseen}$\uparrow$ & $\Delta_{\text{gen}}$$\downarrow$ \\
         \midrule
-        \multirow{2}{*}{\textit{Naive}} 
-        & DP-EE & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
-        & DP-EE-Proj & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
+        \multirow{2}{*}{\textit{Baselines}} 
+        & DP-SE3 & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
+        & DP-SE3-Proj & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
         \midrule
-        \multirow{4}{*}{\textit{RCM Actions}} 
-        & DP-RCM-1 $(d_{\text{rel}}, R_{\text{rel}})$ & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
-        & DP-RCM-2 $(\gamrel, \prel)$ & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
-        & DP-RCM-3 $(d_{\text{rel}}, R_{\text{abs}})$ & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
-        & DP-RCM-4 $(\gamrel, \pabs)$ & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
+        \multirow{2}{*}{\textit{Fully-Rel.}} 
+        & STAR-1 & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
+        & STAR-2 & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
         \midrule
-        \multirow{2}{*}{\textit{Ours}} 
-        & STAR-Diff-Single & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
-        & \textbf{STAR-Diff} & \texttt{[\textbf{XX.X}]} & \texttt{[\textbf{XX.X}]} & \texttt{[\textbf{XX.X}]} \\
+        \multirow{4}{*}{\textit{Mixed}} 
+        & STAR-3-S & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
+        & STAR-3-H & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
+        & STAR-4-S & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
+        & STAR-4-H & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
         \bottomrule
     \end{tabular}
     }
-    \vspace{0.5em}
-    
-    {\footnotesize Results averaged over 30 trials per trocar (240 seen, 120 unseen). Best in \textbf{bold}.}
 \end{table}
 
-\subsubsection{Analysis for RQ1: Generalization to Unseen Trocars}
-
-Comparing the ``Unseen'' column and $\Delta_{\text{gen}}$ across all methods reveals generalization capability.
-
-\textbf{Expected Findings:}
-\begin{itemize}
-    \item \textbf{DP-EE} should show the largest generalization gap, as the learned trajectories are tied to specific trocar configurations.
-    \item \textbf{RCM action space methods} (DP-RCM-1 to 4) should show varying generalization depending on their trocar-invariant properties.
-    \item \textbf{STAR-Diff} should achieve the smallest $\Delta_{\text{gen}}$ due to its trocar-invariant absolute position prediction.
-\end{itemize}
-
-\subsubsection{Analysis for RQ2: RCM-aware vs. Naive Action Space}
-
-Comparing Group 1 (Naive) vs. Groups 2-3 (RCM-aware) isolates the effect of action space design.
-
-\textbf{Expected Findings:}
-\begin{itemize}
-    \item \textbf{DP-EE} should achieve reasonable success on seen trocars but with implicit RCM violations that may cause failures.
-    \item \textbf{DP-EE-Proj} should improve over DP-EE by enforcing RCM, but post-hoc projection may introduce discontinuities that hurt performance.
-    \item \textbf{All RCM action space methods} guarantee zero RCM violations by construction, leading to more reliable execution.
-    \item Among RCM parameterizations, $\xrcm^{(4)} = (\gamrel, \pabs)$ should perform best due to configuration consistency (Section~\ref{sec:problem_formulation}).
-\end{itemize}
-
-\subsubsection{Analysis for RQ3: Hierarchical vs. Single Architecture}
-
-Comparing \textbf{STAR-Diff-Single} (= DP-RCM-4) vs. \textbf{STAR-Diff} isolates the benefit of hierarchical decomposition.
-
-\textbf{Expected Findings:}
-\begin{itemize}
-    \item Both methods use the same action space $\xrcm^{(4)}$, so differences arise purely from architecture.
-    \item \textbf{STAR-Diff-Single} must learn to predict both $\pabs$ and $\gamrel$ jointly, with $\gamrel$ depending on trocar parameters.
-    \item \textbf{STAR-Diff} decouples: the diffusion model predicts only trocar-invariant $\pabs$, while a simple MLP handles $\gamrel$.
-    \item The hierarchical design should yield better generalization (smaller $\Delta_{\text{gen}}$) by allowing the diffusion model to focus on task-relevant multimodality without trocar-induced variation.
-\end{itemize}
-
-\subsection{Qualitative Analysis}
-
-Figure~\ref{fig:qualitative} visualizes representative rollout trajectories.
-
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{figures/qualitative.pdf}
-    \caption{\textbf{Qualitative Comparison.} Rollout trajectories across three trocar configurations (columns) for selected methods. Trocar points marked with $\times$. Top row: seen trocars. Bottom row: unseen trocars. \texttt{[PLACEHOLDER]}}
-    \label{fig:qualitative}
-\end{figure}
-
-\textbf{Expected Observations:}
-\begin{itemize}
-    \item \textbf{DP-EE}: Trajectories may deviate from RCM constraint, especially for unseen trocars.
-    \item \textbf{DP-RCM-1/2} (fully relative): Valid trajectories but may struggle to adapt to unseen trocars.
-    \item \textbf{DP-RCM-3}: Poor performance due to configuration inconsistency of $R_{\text{abs}}$.
-    \item \textbf{STAR-Diff}: Smooth, RCM-compliant trajectories that adapt naturally across trocar positions.
-\end{itemize}
-
-\subsection{Additional Analysis}
-
-\subsubsection{Performance vs. Trocar Distance}
-
-Figure~\ref{fig:trocar_distance} analyzes how success rate degrades as test trocars deviate from the training distribution.
-
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=0.85\columnwidth]{figures/trocar_distance.pdf}
-    \caption{\textbf{Success Rate vs. Trocar Distance from Training Set.} Methods with trocar-invariant representations should degrade more gracefully. \texttt{[PLACEHOLDER]}}
-    \label{fig:trocar_distance}
-\end{figure}
-
-\subsubsection{Computational Overhead}
+\subsection{Ablation: Observation Space}
 
 \begin{table}[t]
     \centering
-    \caption{Inference Time Comparison}
-    \label{tab:computation}
-    \begin{tabular}{@{}lcc@{}}
+    \caption{Effect of Trocar-Centric Encoding (using STAR-4-H)}
+    \label{tab:obs_ablation}
+    \begin{tabular}{@{}lccc@{}}
         \toprule
-        \textbf{Method} & \textbf{Time (ms)} & \textbf{Freq. (Hz)} \\
+        \textbf{Observation} & \textbf{Seen} & \textbf{Unseen} & $\Delta_{\text{gen}}$ \\
         \midrule
-        DP-EE / DP-RCM-* / Single & \texttt{[XX]} & \texttt{[XX]} \\
-        \textbf{STAR-Diff} & \texttt{[XX]} & \texttt{[XX]} \\
+        RGB only & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
+        RGB + TC & \texttt{[XX.X]} & \texttt{[XX.X]} & \texttt{[XX.X]} \\
         \bottomrule
     \end{tabular}
-    
-    {\footnotesize Measured on RTX 3090 with DDIM (10 steps).}
 \end{table}
 
-\textbf{Expected:} The additional MLP in STAR-Diff introduces $<$1ms overhead, maintaining real-time control.
+\subsection{Ablation: Architecture (Single vs. Hierarchical)}
+
+Comparison of STAR-3-S vs. STAR-3-H and STAR-4-S vs. STAR-4-H in Table~\ref{tab:main_results} evaluates the benefit of hierarchical decomposition for mixed action spaces.
 
 %==============================================================================
 % SECTION 6: DISCUSSION AND CONCLUSION
@@ -731,38 +522,90 @@ Figure~\ref{fig:trocar_distance} analyzes how success rate degrades as test troc
 \section{Discussion and Conclusion}
 \label{sec:conclusion}
 
-\subsection{Discussion}
+\subsection{Limitations}
 
-\textbf{Limitations.} Our current work has several limitations that suggest directions for future research:
+\textit{(1) Depth Requirement}: Trocar-centric encoding requires depth; extending to monocular depth estimation would broaden applicability.
 
-\textit{(1) 6-DoF Manipulator Constraint.} STAR-Diff is designed for standard 6-DoF manipulators without articulated wrists. While this democratizes surgical automation research, it limits the dexterity compared to systems like da Vinci with EndoWrist. Extending our framework to 7+ DoF systems with redundant kinematics is an important direction.
+\textit{(2) 6-DoF Constraint}: Extension to redundant manipulators (7+ DoF) is future work.
 
-\textit{(2) Single Fixed Camera.} We assume a fixed monocular camera observing the workspace. Clinical laparoscopy typically uses an endoscopic camera inserted through a separate trocar, which moves during the procedure. Incorporating dynamic camera poses into our framework would enhance clinical applicability.
+\textit{(3) Fixed Camera}: Incorporating dynamic endoscope poses would enhance clinical applicability.
 
-\textit{(3) Single-Arm Evaluation.} Our experiments focus on single-arm peg transfer. Extending to bimanual tasks (e.g., suturing) where both arms must coordinate while respecting individual RCM constraints presents additional challenges.
-
-\textit{(4) Simulation-Only Evaluation.} While our simulation environment provides realistic physics and visuals, validation on physical hardware is necessary to assess sim-to-real transfer and real-world robustness.
-
-\textbf{Broader Impact.} By enabling surgical policies that generalize across trocar configurations, STAR-Diff takes a step toward clinically deployable autonomous surgical systems. The use of commodity manipulators rather than proprietary platforms could reduce barriers to surgical robotics research and potentially lower costs of surgical automation. However, autonomous surgery raises significant safety and ethical considerations that must be carefully addressed before clinical deployment.
+\textit{(4) Simulation-Only}: Hardware validation is needed.
 
 \subsection{Conclusion}
 
-We presented STAR-Diff, a diffusion-based imitation learning framework for trocar-adaptive surgical manipulation. Our key contributions are:
+We presented STAR-Diff for trocar-adaptive surgical manipulation with the following contributions:
 
 \begin{enumerate}
-    \item \textbf{RCM-aware Action Space}: By directly parameterizing the RCM constraint manifold, we guarantee constraint satisfaction by construction, eliminating the need for post-hoc enforcement mechanisms.
+    \item \textbf{RCM-aware Action Space}: Four parameterizations guaranteeing constraint satisfaction by construction—eliminating the need for runtime projection that plagues existing approaches.
     
-    \item \textbf{Hierarchical Architecture}: By decomposing the action space into trocar-invariant (absolute position) and trocar-dependent (relative rotation) components, we enable efficient learning that generalizes across trocar configurations.
+    \item \textbf{Trocar-Centric Observation Space}: Dense coordinate encoding bridging observation-action frame gaps without wrist-mounted cameras.
     
-    \item \textbf{Theoretical Foundation}: We provided geometric analysis of the RCM constraint structure and formal guarantees of constraint satisfaction.
+    \item \textbf{Tailored Architectures}: Single model for fully-relative; hierarchical model for mixed action spaces.
 \end{enumerate}
 
-\texttt{[To be updated after experiments:} Our experiments on the peg transfer task demonstrate that STAR-Diff achieves [XX\%] success rate on unseen trocar configurations, compared to [XX\%] for the best baseline, while maintaining zero RCM violations.\texttt{]}
+%==============================================================================
+% APPENDIX
+%==============================================================================
+\appendix
 
-Looking forward, we envision extending STAR-Diff to more complex surgical tasks, bimanual manipulation, and real-world deployment. The principles of constraint-aware action space design and trocar-invariant decomposition may also apply to other constrained manipulation domains beyond surgery.
+\section{Action-to-Pose Transformations}
+\label{app:action_transform}
+
+\subsection{Preliminaries}
+
+Trocar position: $\ptrocar = \mathbf{o}_{\text{ref}} + r [\sin\theta \cos\phi, \sin\theta \sin\phi, \cos\theta]^\top$
+
+$\text{RotationAlign}(\mathbf{a}, \mathbf{b})$ computes rotation mapping $\mathbf{a}$ to $\mathbf{b}$ via Rodrigues' formula.
+
+\subsection{$\xrcm^{(1)} = (d_{\text{rel}}, R_{\text{rel}})$}
+\begin{align}
+    R_E &= {}^{W}R_{T}(\lambdatrocar) \cdot R_{\text{rel}} \\
+    \mathbf{p}_E &= \ptrocar + d_{\text{rel}} \cdot R_E \mathbf{e}_z
+\end{align}
+
+\subsection{$\xrcm^{(2)} = (\gamrel, \prel)$}
+\begin{align}
+    \mathbf{p}_E &= {}^{W}R_{T} \cdot \prel + \ptrocar \\
+    \mathbf{v} &= (\mathbf{p}_E - \ptrocar) / \|\mathbf{p}_E - \ptrocar\| \\
+    R_E &= \text{RotationAlign}(\mathbf{e}_z, \mathbf{v}) \cdot R_z(\gamrel)
+\end{align}
+
+\subsection{$\xrcm^{(3)} = (d_{\text{rel}}, R_{\text{abs}})$}
+\begin{align}
+    R_E &= R_{\text{abs}} \\
+    \mathbf{p}_E &= \ptrocar + d_{\text{rel}} \cdot R_E \mathbf{e}_z
+\end{align}
+
+\subsection{$\xrcm^{(4)} = (\gamrel, \pabs)$}
+\begin{align}
+    \mathbf{p}_E &= \pabs \\
+    \mathbf{v} &= (\pabs - \ptrocar) / \|\pabs - \ptrocar\| \\
+    R_E &= \text{RotationAlign}(\mathbf{e}_z, \mathbf{v}) \cdot R_z(\gamrel)
+\end{align}
+
+\section{Network Architecture}
+\label{app:network}
+
+\textbf{Vision Encoder}: ResNet-18 (6-channel) with spatial softmax, output $\in \real^{512}$.
+
+\textbf{Trocar Encoder}: 2-layer MLP, output $\in \real^{64}$.
+
+\textbf{U-Net}: 1D with 4 blocks, 256 base channels, FiLM conditioning.
+
+\textbf{Relative MLP}: 3 residual blocks (256 dim, LayerNorm, GELU).
+
+\section{Training Details}
+\label{app:training}
+
+\textbf{Data}: 30 demos per trocar config at 30 Hz. Trocar range: $r \in [0, 5]$ cm, $\theta \in [60°, 120°]$, $\phi \in [0°, 360°]$.
+
+\textbf{Diffusion}: $K = 100$ train / 10 DDIM inference, cosine schedule, $T_o = 2$, $H = 16$.
+
+\textbf{Optimization}: AdamW, lr $= 10^{-4}$, batch 256, 100K iterations.
 
 %==============================================================================
-% REFERENCES (Placeholder entries)
+% REFERENCES
 %==============================================================================
 \bibliographystyle{IEEEtran}
 \begin{thebibliography}{99}
@@ -771,13 +614,13 @@ Looking forward, we envision extending STAR-Diff to more complex surgical tasks,
 M. J. Mack, ``Minimally invasive and robotic surgery,'' \textit{JAMA}, vol. 285, no. 5, pp. 568--572, 2001.
 
 \bibitem{intuitive2023davinci}
-Intuitive Surgical, ``da Vinci Surgical System,'' 2023. [Online]. Available: \url{https://www.intuitive.com/}
+Intuitive Surgical, ``da Vinci Surgical System,'' 2023.
 
 \bibitem{chi2023diffusion}
-C. Chi, S. Feng, Y. Du, Z. Xu, E. Cousineau, B. Burchfiel, and S. Song, ``Diffusion policy: Visuomotor policy learning via action diffusion,'' in \textit{Proc. RSS}, 2023.
+C. Chi \textit{et al.}, ``Diffusion policy: Visuomotor policy learning via action diffusion,'' in \textit{Proc. RSS}, 2023.
 
 \bibitem{zhao2023learning}
-T. Z. Zhao, V. Kumar, S. Levine, and C. Finn, ``Learning fine-grained bimanual manipulation with low-cost hardware,'' in \textit{Proc. RSS}, 2023.
+T. Z. Zhao \textit{et al.}, ``Learning fine-grained bimanual manipulation with low-cost hardware,'' in \textit{Proc. RSS}, 2023.
 
 \bibitem{scheikl2024movement}
 S. Scheikl \textit{et al.}, ``Movement primitive diffusion for dexterous surgical manipulation,'' in \textit{Proc. ICRA}, 2024.
@@ -790,6 +633,18 @@ W. Reynolds, ``The first laparoscopic cholecystectomy,'' \textit{JSLS}, vol. 5, 
 
 \bibitem{murphy2001surgeon}
 D. Murphy \textit{et al.}, ``Surgeon preferences and peritoneal access,'' \textit{Surg. Endosc.}, vol. 15, pp. 1236--1240, 2001.
+
+\bibitem{kazanzides2014open}
+P. Kazanzides \textit{et al.}, ``An open-source research kit for the da Vinci surgical system,'' in \textit{Proc. ICRA}, 2014.
+
+\bibitem{kim2024srt}
+J. Kim \textit{et al.}, ``Surgical Robot Transformer (SRT): Imitation learning for surgical tasks,'' in \textit{Proc. ICRA}, 2024.
+
+\bibitem{kim2024srth}
+J. Kim \textit{et al.}, ``SRT-H: A hierarchical framework for autonomous surgery via language conditioned imitation learning,'' \textit{arXiv preprint}, 2024.
+
+\bibitem{chiu2024suturebot}
+A. Chiu \textit{et al.}, ``SutureBot: A precision framework and benchmark for autonomous end-to-end suturing,'' \textit{arXiv preprint}, 2024.
 
 \bibitem{taylor1999steady}
 R. H. Taylor \textit{et al.}, ``A steady-hand robotic system for microsurgical augmentation,'' \textit{Int. J. Robot. Res.}, vol. 18, no. 12, pp. 1201--1210, 1999.
@@ -809,74 +664,26 @@ J. van den Berg \textit{et al.}, ``Superhuman performance of surgical tasks by r
 \bibitem{schulman2013case}
 J. Schulman \textit{et al.}, ``A case study of trajectory transfer through non-rigid registration for a simplified suturing scenario,'' in \textit{Proc. IROS}, 2013.
 
-\bibitem{thananjeyan2017multilateral}
-B. Thananjeyan \textit{et al.}, ``Multilateral surgical pattern cutting in 2D orthotropic gauze with deep reinforcement learning policies for tensioning,'' in \textit{Proc. ICRA}, 2017.
-
-\bibitem{varier2020collaborative}
-V. M. Varier \textit{et al.}, ``Collaborative suturing: A reinforcement learning approach,'' in \textit{Proc. CASE}, 2020.
-
 \bibitem{guthart2000intuitive}
 G. S. Guthart and J. K. Salisbury, ``The Intuitive telesurgery system: Overview and application,'' in \textit{Proc. ICRA}, 2000.
-
-\bibitem{simaan2009design}
-N. Simaan \textit{et al.}, ``Design and integration of a telerobotic system for minimally invasive surgery of the throat,'' \textit{Int. J. Robot. Res.}, vol. 28, no. 9, pp. 1134--1153, 2009.
-
-\bibitem{locke2007optimal}
-R. C. Locke and R. V. Patel, ``Optimal remote center-of-motion location for robotics-assisted minimally-invasive surgery,'' in \textit{Proc. ICRA}, 2007.
 
 \bibitem{selvaggio2018safe}
 M. Selvaggio \textit{et al.}, ``Safe and efficient autonomous navigation for teleoperation in surgery,'' \textit{IEEE RA-L}, vol. 3, no. 4, pp. 3373--3380, 2018.
 
-\bibitem{richter2021open}
-F. Richter \textit{et al.}, ``Open-sourced reinforcement learning environments for surgical robotics,'' in \textit{Proc. IROS}, 2021.
-
-\bibitem{tobin2017domain}
-J. Tobin \textit{et al.}, ``Domain randomization for transferring deep neural networks from simulation to the real world,'' in \textit{Proc. IROS}, 2017.
-
-\bibitem{tzeng2020adapting}
-E. Tzeng \textit{et al.}, ``Adapting deep visuomotor representations with weak pairwise constraints,'' in \textit{Proc. WAFR}, 2020.
+\bibitem{ze20243d}
+Y. Ze \textit{et al.}, ``3D diffusion policy,'' in \textit{Proc. RSS}, 2024.
 
 \bibitem{simeonov2022neural}
 A. Simeonov \textit{et al.}, ``Neural descriptor fields: SE(3)-equivariant object representations for manipulation,'' in \textit{Proc. ICRA}, 2022.
 
-\bibitem{da2012learning}
-B. Da Silva \textit{et al.}, ``Learning parameterized skills,'' in \textit{Proc. ICML}, 2012.
-
-\bibitem{finn2017model}
-C. Finn \textit{et al.}, ``Model-agnostic meta-learning for fast adaptation of deep networks,'' in \textit{Proc. ICML}, 2017.
-
-\bibitem{kazanzides2014open}
-P. Kazanzides \textit{et al.}, ``An open-source research kit for the da Vinci surgical system,'' in \textit{Proc. ICRA}, 2014.
-
-\bibitem{shin2019autonomous}
-C. Shin \textit{et al.}, ``Autonomous tissue manipulation via surgical robot using learning based model predictive control,'' in \textit{Proc. ICRA}, 2019.
+\bibitem{liu2018intriguing}
+R. Liu \textit{et al.}, ``An intriguing failing of convolutional neural networks and the coordconv solution,'' in \textit{Proc. NeurIPS}, 2018.
 
 \bibitem{ho2020denoising}
 J. Ho, A. Jain, and P. Abbeel, ``Denoising diffusion probabilistic models,'' in \textit{Proc. NeurIPS}, 2020.
 
-\bibitem{song2020score}
-Y. Song \textit{et al.}, ``Score-based generative modeling through stochastic differential equations,'' in \textit{Proc. ICLR}, 2021.
-
-\bibitem{ze20243d}
-Y. Ze \textit{et al.}, ``3D diffusion policy,'' in \textit{Proc. RSS}, 2024.
-
-\bibitem{ajay2022conditional}
-A. Ajay \textit{et al.}, ``Is conditional generative modeling all you need for decision-making?'' in \textit{Proc. ICLR}, 2023.
-
-\bibitem{reuss2023goal}
-M. Reuss \textit{et al.}, ``Goal-conditioned imitation learning using score-based diffusion policies,'' in \textit{Proc. RSS}, 2023.
-
-\bibitem{chi2024universal}
-C. Chi \textit{et al.}, ``Universal manipulation interface,'' in \textit{Proc. RSS}, 2024.
-
 \bibitem{prasad2024consistency}
 V. Prasad \textit{et al.}, ``Consistency policy: Accelerated visuomotor policies via consistency distillation,'' in \textit{Proc. RSS}, 2024.
-
-\bibitem{song2020denoising}
-J. Song, C. Meng, and S. Ermon, ``Denoising diffusion implicit models,'' in \textit{Proc. ICLR}, 2021.
-
-\bibitem{nichol2021improved}
-A. Nichol and P. Dhariwal, ``Improved denoising diffusion probabilistic models,'' in \textit{Proc. ICML}, 2021.
 
 \bibitem{peters2004development}
 J. H. Peters \textit{et al.}, ``Development and validation of a comprehensive program of education and assessment of the basic fundamentals of laparoscopic surgery,'' \textit{Surgery}, vol. 135, no. 1, pp. 21--27, 2004.
