@@ -1,0 +1,22 @@
+[package]
+
+# Note: Semantic Versioning is used: https://semver.org/
+version = "0.1.0"
+
+# Description
+title = "STAR-Diff: Surgical Trocar-Adaptive Diffusion Policy"
+description = "RCM-aware Diffusion Policy for Laparoscopic Surgery in Isaac Lab"
+readme = "README.md"
+repository = "https://github.com/isaac-sim/IsaacLab"
+category = "robotics"
+keywords = ["robotics", "surgical", "diffusion policy", "RCM", "laparoscopic"]
+
+[dependencies]
+"isaaclab" = {}
+"isaaclab_assets" = {}
+
+[core]
+reloadable = false
+
+[[python.module]]
+name = "star_diff"
