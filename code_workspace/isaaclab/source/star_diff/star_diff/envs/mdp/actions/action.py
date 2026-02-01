@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 from isaaclab.managers import ActionTerm
 from isaaclab.utils.math import (
-    quat_from_angle_axis, quat_mul, quat_conjugate, 
+    quat_from_angle_axis, quat_mul, quat_conjugate,
     quat_rotate_inverse, quat_rotate, combine_frame_transforms
 )
-from isaaclab.assets import Articulation
+from isaaclab.assets import Articulation, RigidObject
 
-from .actions_cfg import RCMAwareActionCfg
-from .....controller.ik_with_joint_space_controller import IKWithJointSpaceController
-from .....controller.impedance_controller import ImpedanceController
-from .....controller.operational_space_controller import OperationalSpaceControllerWrapper
-from .....configs.controller_cfg import IKWithJointSpaceControllerCfg, ImpedanceControllerCfg, OperationalSpaceControllerWrapperCfg
+from ....controller.ik_with_joint_space_controller import IKWithJointSpaceController
+from ....controller.impedance_controller import ImpedanceController
+from ....controller.operational_space_controller import OperationalSpaceControllerWrapper
+from ....configs.controller_cfg import IKWithJointSpaceControllerCfg, ImpedanceControllerCfg, OperationalSpaceControllerWrapperCfg
+
+if TYPE_CHECKING:
+    from .actions_cfg import RCMAwareActionCfg
 
 def rotation_align(v_from: torch.Tensor, v_to: torch.Tensor) -> torch.Tensor:
     """
@@ -56,10 +60,11 @@ class RCMAwareAction(ActionTerm):
     
     def __init__(self, cfg: RCMAwareActionCfg, env):
         super().__init__(cfg, env)
-        
+
         # Get references to assets
         self._asset: Articulation = env.scene[cfg.asset_name]
-        self._trocar: Articulation = env.scene[cfg.trocar_asset_name]
+        # Trocar can be RigidObject or Articulation
+        self._trocar = env.scene[cfg.trocar_asset_name]
         
         # Get body index
         self._body_idx = self._asset.find_bodies(cfg.body_name)[0][0]
@@ -86,7 +91,12 @@ class RCMAwareAction(ActionTerm):
 
         # Buffers for actions
         self._raw_actions = torch.zeros(self.num_envs, 4, device=self.device)
-        
+
+        # Buffers for desired EE pose (computed in process_actions, used in apply_actions)
+        self._ee_pos_des = torch.zeros(self.num_envs, 3, device=self.device)
+        self._ee_quat_des = torch.zeros(self.num_envs, 4, device=self.device)
+        self._ee_quat_des[:, 0] = 1.0  # Identity quaternion
+
         # Constants
         self._e_z = torch.zeros(self.num_envs, 3, device=self.device)
         self._e_z[:, 2] = 1.0
@@ -193,46 +203,54 @@ class RCMAwareAction(ActionTerm):
         else:
             raise ValueError(f"Invalid RCM Variant: {self.cfg.rcm_variant}")
 
-        # 3. Call Controller
-        # Get robot state
-        # Jacobian from `body_idx`
-        jacobians = self._asset.data.body_jacobians[:, self._body_idx, :, :] # (N, 6, NJ)
-        
+        # 3. Store desired pose for apply_actions (called decimation times per env step)
+        # This is the key fix: we compute RCM transformation once per env step,
+        # but IK/controller is computed every physics step with latest robot state
+        self._ee_pos_des[:] = ee_pos_des
+        self._ee_quat_des[:] = ee_quat_des
+
+    def apply_actions(self):
+        """Apply actions to the asset.
+
+        This method is called decimation times per env step.
+        We compute the controller output with fresh robot state each time.
+        """
+        # Get fresh robot state (this changes every physics step)
+        jacobians = self._asset.data.body_jacobians[:, self._body_idx, :, :]  # (N, 6, NJ)
+
         current_ee_pos = self._asset.data.body_pos_w[:, self._body_idx]
         current_ee_quat = self._asset.data.body_quat_w[:, self._body_idx]
-        current_ee_pose = torch.cat([current_ee_pos, current_ee_quat], dim=-1) # (N, 7)
-        current_ee_vel = self._asset.data.body_vel_w[:, self._body_idx] # (N, 6)
-        
+        current_ee_pose = torch.cat([current_ee_pos, current_ee_quat], dim=-1)  # (N, 7)
+        current_ee_vel = self._asset.data.body_vel_w[:, self._body_idx]  # (N, 6)
+
         current_joint_pos = self._asset.data.joint_pos
         current_joint_vel = self._asset.data.joint_vel
-        
-        mass_matrix = self._asset.data.mass_matrix # (N, NJ, NJ)
-        
+
+        mass_matrix = self._asset.data.mass_matrix  # (N, NJ, NJ)
+
+        # Compute controller output with latest state
         if self._output_type == "joint_pos":
-            # IK Controller
+            # IK Controller - compute with fresh state for reactive error correction
             targets = self._controller.compute(
-                ee_pos_des, ee_quat_des,
-                current_ee_pos, current_ee_quat,
-                jacobians, current_joint_pos
+                self._ee_pos_des,
+                self._ee_quat_des,
+                current_ee_pos,
+                current_ee_quat,
+                jacobians,
+                current_joint_pos,
             )
-            self._joint_pos_target = targets
-            
+            self._asset.set_joint_position_target(targets)
+
         elif self._output_type == "joint_effort":
-            # Impedance or OSC
+            # Impedance or OSC - compute torques with fresh state
             targets = self._controller.compute(
-                ee_pos_des=ee_pos_des, 
-                ee_quat_des=ee_quat_des,
+                ee_pos_des=self._ee_pos_des,
+                ee_quat_des=self._ee_quat_des,
                 jacobian=jacobians,
                 current_ee_pose=current_ee_pose,
                 current_ee_vel=current_ee_vel,
                 mass_matrix=mass_matrix,
                 current_joint_pos=current_joint_pos,
-                current_joint_vel=current_joint_vel
+                current_joint_vel=current_joint_vel,
             )
-            self._joint_effort_target = targets
-
-    def apply_actions(self):
-        if self._output_type == "joint_pos":
-            self._asset.set_joint_position_target(self._joint_pos_target)
-        elif self._output_type == "joint_effort":
-            self._asset.set_joint_effort_target(self._joint_effort_target)
+            self._asset.set_joint_effort_target(targets)

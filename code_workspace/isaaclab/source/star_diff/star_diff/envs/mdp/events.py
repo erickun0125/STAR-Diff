@@ -1,16 +1,33 @@
 import torch
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.assets import Articulation
-from isaaclab.utils.math import quat_from_matrix
+from isaaclab.assets import Articulation, RigidObject
 import math
 
-def randomize_trocar_pose(env, env_ids: torch.Tensor, asset_cfg: SceneEntityCfg, r_range: tuple[float, float], theta_range: tuple[float, float], phi_range: tuple[float, float], ref_point: tuple[float, float, float] = (0.5, 0.0, 0.0)):
+
+def randomize_trocar_pose(
+    env,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg,
+    r_range: tuple[float, float],
+    theta_range: tuple[float, float],
+    phi_range: tuple[float, float],
+    ref_point: tuple[float, float, float] = (0.5, 0.0, 0.0),
+):
+    """Randomize Trocar Pose based on spherical coordinates.
+
+    Formula: p_T = O_ref + [r sin(θ) cos(φ), r sin(θ) sin(φ), r cos(θ)]
+
+    Args:
+        env: The environment instance.
+        env_ids: Environment indices to randomize.
+        asset_cfg: Configuration for the trocar asset.
+        r_range: Range for radial distance (min, max).
+        theta_range: Range for polar angle in radians (min, max).
+        phi_range: Range for azimuthal angle in radians (min, max).
+        ref_point: Reference point for spherical coordinates.
     """
-    Randomize Trocar Pose based on spherical coordinates.
-    p_T = O_ref + [r sin(th) cos(phi), r sin(th) sin(phi), r cos(th)]
-    """
-    # Resolve asset
-    asset: Articulation = env.scene[asset_cfg.name]
+    # Resolve asset (can be RigidObject or Articulation)
+    asset = env.scene[asset_cfg.name]
     
     num_envs = len(env_ids)
     

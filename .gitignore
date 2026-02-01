@@ -11,3 +11,6 @@
 *.fdb_latexmk
 *.fls
 PKG-INFO
+*.egg-info/
+# ignore usd files in orbit
+**/orbit-surgical/**/*.usd

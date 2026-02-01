@@ -35,8 +35,14 @@ import isaaclab.utils.math as math_utils
 from isaaclab.controllers.operational_space import OperationalSpaceController
 from isaaclab.controllers.operational_space_cfg import OperationalSpaceControllerCfg
 
-# Import the FR5 configuration from your existing file
-from star_diff.assets.fr5_end import FR5_ROBOT_CFG
+# Import robot configuration
+# NOTE: FR5 USD currently has multiple articulation roots - using Franka as fallback
+# To use FR5: 1) Fix the USD file (remove extra articulation roots)
+#             2) Change the import below to use FR5_CFG from star_diff
+from isaaclab_assets import FRANKA_PANDA_HIGH_PD_CFG
+
+# Uncomment below and comment out the Franka import when FR5 USD is fixed:
+# from star_diff import FR5_CFG
 
 
 @configclass
@@ -51,14 +57,20 @@ class FR5SceneCfg(InteractiveSceneCfg):
         prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75))
     )
 
-    # FR5 robot
-    fr5_robot = FR5_ROBOT_CFG.replace(
+    # Robot: Using Franka as placeholder until FR5 USD is fixed
+    # To use FR5, replace FRANKA_PANDA_HIGH_PD_CFG with FR5_CFG and update actuators
+    fr5_robot = FRANKA_PANDA_HIGH_PD_CFG.replace(
         prim_path="{ENV_REGEX_NS}/FR5",
         actuators={
-            "arm": ImplicitActuatorCfg(
-                joint_names_expr=[".*"],
-                stiffness=0.0,   # Set to 0 for torque/effort control
-                damping=0.0,     # Set to 0 for torque/effort control
+            "panda_shoulder": ImplicitActuatorCfg(
+                joint_names_expr=["panda_joint[1-4]"],
+                stiffness=0.0,
+                damping=0.0,
+            ),
+            "panda_forearm": ImplicitActuatorCfg(
+                joint_names_expr=["panda_joint[5-7]"],
+                stiffness=0.0,
+                damping=0.0,
             ),
         },
     )
