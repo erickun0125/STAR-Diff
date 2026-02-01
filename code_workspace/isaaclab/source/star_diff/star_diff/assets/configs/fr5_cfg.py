@@ -43,6 +43,9 @@ FR5_CFG = ArticulationCfg(
             "j4": -1.0,
             "j5": 0.5,
             "j6": 0.5,
+            # PSM gripper: gripper1 negative, gripper2 positive (mirrored)
+            "psm_tool_gripper1_joint": 0.0,
+            "psm_tool_gripper2_joint": 0.0,
         },
         joint_vel={".*": 0.0},
     ),
@@ -51,6 +54,11 @@ FR5_CFG = ArticulationCfg(
             joint_names_expr=["j[1-6]"],
             stiffness=4000.0,
             damping=40.0,
+        ),
+        "gripper": ImplicitActuatorCfg(
+            joint_names_expr=["psm_tool_gripper.*"],
+            stiffness=1000.0,
+            damping=10.0,
         ),
     },
     soft_joint_pos_limit_factor=1.0,

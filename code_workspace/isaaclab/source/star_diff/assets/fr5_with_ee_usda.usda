@@ -323,6 +323,7 @@ def Xform "World"
     }
 
     def "psm_col_rev2" (
+        delete apiSchemas = ["PhysxArticulationAPI", "PhysicsArticulationRootAPI"]
         prepend payload = @end_effector.usd@
     )
     {

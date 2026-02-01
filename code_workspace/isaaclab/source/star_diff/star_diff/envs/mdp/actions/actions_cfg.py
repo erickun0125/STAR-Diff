@@ -29,7 +29,7 @@ class RCMAwareActionCfg(ActionTermCfg):
     trocar_asset_name: str = "trocar"
     """Name of the trocar asset."""
 
-    body_name: str = "ee_link"
+    body_name: str = "psm_tool_tip_link"
     """Name of the end-effector body."""
 
     scale: float | dict[str, float] = 1.0

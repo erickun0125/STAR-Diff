@@ -118,7 +118,7 @@ class ActionsCfg:
             command_type="pose",
             ik_method="pinv",
         ),
-        body_name="ee_link",
+        body_name="psm_tool_tip_link",
         scale=1.0,
         debug_vis=False,
     )
@@ -144,11 +144,11 @@ class ObservationsCfg:
         # End-Effector State (World Frame)
         ee_pos = ObsTerm(
             func=star_observations.ee_pos_w,
-            params={"asset_cfg": SceneEntityCfg("robot"), "body_name": "ee_link"},
+            params={"asset_cfg": SceneEntityCfg("robot"), "body_name": "psm_tool_tip_link"},
         )
         ee_quat = ObsTerm(
             func=star_observations.ee_quat_w,
-            params={"asset_cfg": SceneEntityCfg("robot"), "body_name": "ee_link"},
+            params={"asset_cfg": SceneEntityCfg("robot"), "body_name": "psm_tool_tip_link"},
         )
 
         # Trocar State
@@ -217,7 +217,7 @@ class RewardsCfg:
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "peg_cfg": SceneEntityCfg("peg"),
-            "body_name": "ee_link",
+            "body_name": "psm_tool_tip_link",
             "std": 0.1,
         },
     )
@@ -228,7 +228,7 @@ class RewardsCfg:
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "peg_cfg": SceneEntityCfg("peg"),
-            "body_name": "ee_link",
+            "body_name": "psm_tool_tip_link",
             "grasp_threshold": 0.03,
         },
     )
@@ -274,7 +274,7 @@ class RewardsCfg:
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "trocar_cfg": SceneEntityCfg("trocar"),
-            "body_name": "ee_link",
+            "body_name": "psm_tool_tip_link",
             "tolerance": 0.01,
         },
     )
@@ -308,7 +308,7 @@ class TerminationsCfg:
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "trocar_cfg": SceneEntityCfg("trocar"),
-            "body_name": "ee_link",
+            "body_name": "psm_tool_tip_link",
             "max_deviation": 0.05,
         },
     )
@@ -317,7 +317,7 @@ class TerminationsCfg:
         func=star_terminations.out_of_bounds,
         params={
             "robot_cfg": SceneEntityCfg("robot"),
-            "body_name": "ee_link",
+            "body_name": "psm_tool_tip_link",
             "bounds": {
                 "x": (0.1, 0.8),
                 "y": (-0.4, 0.4),
